@@ -22,11 +22,74 @@ export default function JudgePageNew() {
   const [assistanceOpen, setAssistanceOpen] = useState(false)
   const [assistanceRequested, setAssistanceRequested] = useState(false)
   const [categories, setCategories] = useState([])
+  const [allCategories, setAllCategories] = useState([])
+  const [rounds, setRounds] = useState([])
   const [currentScoresData, setCurrentScoresData] = useState({})
+  const [activeRoundId, setActiveRoundId] = useState(null)
+  const [activeRoundName, setActiveRoundName] = useState('Current Round')
+
+  useEffect(() => {
+    if (rounds.length === 0) return
+
+    if (!activeRoundId) {
+      const firstRound = rounds[0]
+      if (firstRound) {
+        setActiveRoundId(String(firstRound.id))
+        setActiveRoundName(firstRound.name || 'Current Round')
+      }
+      return
+    }
+
+    const matchedRound = rounds.find(round => String(round.id) === String(activeRoundId))
+    if (matchedRound) {
+      setActiveRoundName(matchedRound.name || 'Current Round')
+    }
+  }, [rounds, activeRoundId])
+
+  useEffect(() => {
+    if (!allCategories.length) {
+      setCategories([])
+      return
+    }
+
+    if (!activeRoundId) {
+      setCategories(allCategories)
+      return
+    }
+
+    const filtered = allCategories.filter(
+      (category) => String(category.round_id) === String(activeRoundId)
+    )
+
+    if (filtered.length > 0) {
+      setCategories(filtered)
+      return
+    }
+
+    const fallbackCategory = allCategories.find((category) => category.round_id)
+    if (fallbackCategory) {
+      setActiveRoundId(String(fallbackCategory.round_id))
+      const fallback = allCategories.filter(
+        (category) => String(category.round_id) === String(fallbackCategory.round_id)
+      )
+      setCategories(fallback)
+    } else {
+      setCategories(allCategories)
+    }
+  }, [allCategories, activeRoundId])
+
+  useEffect(() => {
+    if (!activeCategory) return
+    const categoryExists = categories.some((category) => category.id === activeCategory)
+    if (!categoryExists) {
+      setActiveCategory(categories[0]?.id || null)
+    }
+  }, [categories, activeCategory])
 
   useEffect(() => {
     fetchJudgeData()
     fetchContestants()
+    fetchRounds()
     fetchCategories()
     fetchSettings()
     checkExistingAssistanceRequest()
@@ -108,6 +171,25 @@ export default function JudgePageNew() {
         console.log('Settings subscription status:', status)
       })
 
+    // Subscribe to rounds changes
+    const roundsSubscription = supabase
+      .channel('rounds-realtime', {
+        config: {
+          broadcast: { self: true }
+        }
+      })
+      .on('postgres_changes', {
+        event: '*',
+        schema: 'public',
+        table: 'rounds'
+      }, (payload) => {
+        console.log('Rounds changed:', payload)
+        fetchRounds()
+      })
+      .subscribe((status) => {
+        console.log('Rounds subscription status:', status)
+      })
+
     // Subscribe to contestants changes
     const contestantsSubscription = supabase
       .channel('contestants-realtime', {
@@ -187,6 +269,7 @@ export default function JudgePageNew() {
       if (assistanceSubscription) {
         supabase.removeChannel(assistanceSubscription)
       }
+      supabase.removeChannel(roundsSubscription)
     }
   }, [token, judge?.id])
 
@@ -260,8 +343,31 @@ export default function JudgePageNew() {
     setLoading(false)
   }
 
-  const fetchCategories = async () => {
-    const { data: categoriesData } = await supabase
+  const fetchRounds = async () => {
+    const { data, error } = await supabase
+      .from('rounds')
+      .select('*')
+      .order('order_index')
+
+    if (error) {
+      console.error('Failed to load rounds:', error)
+      return
+    }
+
+    const normalizedRounds = (data || []).map(round => ({
+      ...round,
+      id: round.id || round.round_id
+    }))
+
+    setRounds(normalizedRounds)
+
+    if (!activeRoundId && normalizedRounds.length > 0) {
+      setActiveRoundId(String(normalizedRounds[0].id))
+    }
+  }
+
+  const fetchCategories = async (roundIdOverride = null) => {
+    const { data: categoriesData, error } = await supabase
       .from('categories')
       .select(`
         *,
@@ -269,21 +375,40 @@ export default function JudgePageNew() {
       `)
       .order('order_index')
 
-    if (categoriesData) {
-      console.log('📊 Loaded categories:', categoriesData)
-      if (categoriesData.length > 0 && categoriesData[0].criteria && categoriesData[0].criteria.length > 0) {
-        console.log('📋 Sample criterion:', categoriesData[0].criteria[0])
-        console.log('🔑 Sample criterion ID:', categoriesData[0].criteria[0].id)
-        console.log('🏷️ Criterion ID type:', typeof categoriesData[0].criteria[0].id)
+    if (error) {
+      console.error('Failed to load categories:', error)
+      toast.error('Unable to load categories')
+      setCategories([])
+      setAllCategories([])
+      return
+    }
+
+    const normalizedCategories = (categoriesData || []).map((category) => {
+      const sortedCriteria = [...(category.criteria || [])].sort(
+        (a, b) => (a.order_index || 0) - (b.order_index || 0)
+      )
+      const roundId = category.round_id ? String(category.round_id) : null
+      return {
+        ...category,
+        round_id: roundId,
+        criteria: sortedCriteria
       }
-      
-      // Sort criteria within each category
-      categoriesData.forEach(cat => {
-        if (cat.criteria) {
-          cat.criteria.sort((a, b) => a.order_index - b.order_index)
-        }
-      })
-      setCategories(categoriesData)
+    })
+
+    setAllCategories(normalizedCategories)
+
+    const overrideRoundId = roundIdOverride ? String(roundIdOverride) : null
+
+    if (overrideRoundId && overrideRoundId !== activeRoundId) {
+      setActiveRoundId(overrideRoundId)
+    }
+
+    if (!overrideRoundId && !activeRoundId) {
+      const roundFromCategories = normalizedCategories.find((cat) => cat.round_id)
+      if (roundFromCategories?.round_id) {
+        const derivedRoundId = String(roundFromCategories.round_id)
+        setActiveRoundId(derivedRoundId)
+      }
     }
   }
 
@@ -335,13 +460,40 @@ export default function JudgePageNew() {
   }
 
   const fetchSettings = async () => {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('settings')
-      .select('*')
-      .eq('key', 'is_locked')
-      .single()
+      .select('key, value')
+      .in('key', ['is_locked', 'active_round_id', 'round_name'])
 
-    setIsLocked(data?.value === 'true')
+    if (error) {
+      console.error('Failed to load settings:', error)
+      return
+    }
+
+    const settingsMap = {}
+    data?.forEach((item) => {
+      settingsMap[item.key] = item.value
+    })
+
+    setIsLocked(settingsMap.is_locked === 'true')
+
+    const nextRoundId = settingsMap.active_round_id
+      ? String(settingsMap.active_round_id).replace(/^"|"$/g, '')
+      : null
+    const nextRoundName = settingsMap.round_name ? settingsMap.round_name.replace(/^"|"$/g, '') : null
+
+    if (nextRoundId) {
+      setActiveRoundId(nextRoundId)
+    } else if (rounds.length > 0) {
+      setActiveRoundId(String(rounds[0].id))
+    }
+
+    if (nextRoundName) {
+      setActiveRoundName(nextRoundName)
+    }
+
+    // Refresh categories so judges always see the currently active round set by admins.
+    fetchCategories(nextRoundId || null)
   }
 
   const checkExistingAssistanceRequest = async () => {
@@ -540,11 +692,17 @@ export default function JudgePageNew() {
             <h2 className="text-xs text-gray-400 uppercase tracking-widest mb-3">MR. AND MS. UNIVERSITY OF MAKATI</h2>
             <h1 className="text-3xl font-bold mb-3">TABULATION SYSTEM</h1>
           </div>
-          {isLocked && (
-            <div className="bg-red-600 px-6 py-3 rounded-lg font-bold shadow-lg animate-pulse">
-              🔒 SCORING LOCKED
+          <div className="flex items-center gap-4">
+            <div className="text-right">
+              <p className="text-xs text-gray-400 uppercase tracking-widest mb-1">Round</p>
+              <p className="text-xl font-bold text-yellow-400 whitespace-nowrap">{activeRoundName || 'Current Round'}</p>
             </div>
-          )}
+            {isLocked && (
+              <div className="bg-red-600 px-6 py-3 rounded-lg font-bold shadow-lg animate-pulse">
+                🔒 SCORING LOCKED
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Split Layout: Left (Scoring) and Right (Photo) */}

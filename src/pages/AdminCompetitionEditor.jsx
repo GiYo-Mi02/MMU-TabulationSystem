@@ -11,15 +11,19 @@ import { Link } from 'react-router-dom'
 
 export default function AdminCompetitionEditor() {
   const [categories, setCategories] = useState([])
+  const [rounds, setRounds] = useState([])
+  const [activeRoundId, setActiveRoundId] = useState(null)
   const [isAddModalOpen, setIsAddModalOpen] = useState(false)
   const [editingCategory, setEditingCategory] = useState(null)
   const [loading, setLoading] = useState(false)
+  const [roundsLoading, setRoundsLoading] = useState(true)
   
   // Form state for category
   const [categoryForm, setCategoryForm] = useState({
     name: '',
     description: '',
     percentage: '',
+    round_id: '',
     criteria: []
   })
   
@@ -27,16 +31,168 @@ export default function AdminCompetitionEditor() {
   const [newCriterion, setNewCriterion] = useState({ name: '', max_points: '' })
 
   useEffect(() => {
-    fetchCategories()
+    const initialize = async () => {
+      await fetchRounds()
+      await fetchActiveRound()
+    }
+
+    initialize()
   }, [])
 
+  useEffect(() => {
+    if (!roundsLoading) {
+      fetchCategories()
+    }
+  }, [roundsLoading])
+
+  useEffect(() => {
+    if (!roundsLoading && rounds.length > 0 && !activeRoundId) {
+      setActiveRoundId(String(rounds[0].id))
+    }
+  }, [rounds, roundsLoading, activeRoundId])
+
   const fetchCategories = async () => {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('categories')
       .select('*, criteria(*)')
       .order('order_index')
 
-    setCategories(data || [])
+    if (error) {
+      console.error('Failed to fetch categories:', error)
+      toast.error('Unable to load categories')
+      return
+    }
+
+    const categoriesWithRounds = (data || []).map((category) => {
+      const roundDetails = rounds.find((round) => String(round.id) === String(category.round_id)) || null
+      return {
+        ...category,
+        round: roundDetails
+      }
+    })
+
+    setCategories(categoriesWithRounds)
+  }
+
+  const ensureDefaultRounds = async () => {
+    const defaultRounds = [
+      {
+        name: 'Preliminary Competition',
+        order_index: 1,
+        max_per_gender: null,
+        advance_per_gender: 8,
+        highlight_per_gender: null
+      },
+      {
+        name: 'Coronation Night',
+        order_index: 2,
+        max_per_gender: 8,
+        advance_per_gender: 3,
+        highlight_per_gender: 5
+      },
+      {
+        name: 'Final Round Coronation Night',
+        order_index: 3,
+        max_per_gender: 3,
+        advance_per_gender: null,
+        highlight_per_gender: 3
+      }
+    ]
+
+    await supabase.from('rounds').upsert(defaultRounds, { onConflict: 'order_index' }).select()
+  }
+
+  const fetchRounds = async () => {
+    try {
+      setRoundsLoading(true)
+      const { data, error, count } = await supabase
+        .from('rounds')
+        .select('*', { count: 'exact' })
+        .order('order_index')
+
+      if (error) throw error
+
+      let roundsData = data || []
+
+      if (!roundsData.length) {
+        await ensureDefaultRounds()
+        const { data: refreshed } = await supabase
+          .from('rounds')
+          .select('*')
+          .order('order_index')
+        roundsData = refreshed || []
+      }
+
+      setRounds(roundsData)
+    } catch (error) {
+      console.error('Failed to fetch rounds:', error)
+      toast.error('Unable to load rounds configuration')
+    } finally {
+      setRoundsLoading(false)
+    }
+  }
+
+  const fetchActiveRound = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('settings')
+        .select('value')
+        .eq('key', 'active_round_id')
+        .maybeSingle()
+
+      if (error) {
+        console.error('Failed to fetch active round:', error)
+        return
+      }
+
+      if (data?.value) {
+        setActiveRoundId(String(data.value).replace(/^"|"$/g, ''))
+        return
+      }
+
+      let { data: firstRound, error: firstRoundError } = await supabase
+        .from('rounds')
+        .select('*')
+        .order('order_index')
+        .limit(1)
+        .maybeSingle()
+
+      if (firstRoundError) {
+        console.error('Failed to determine default round:', firstRoundError)
+        return
+      }
+
+      if (!firstRound) {
+        await ensureDefaultRounds()
+        const { data: seededRound } = await supabase
+          .from('rounds')
+          .select('*')
+          .order('order_index')
+          .limit(1)
+          .maybeSingle()
+        firstRound = seededRound
+      }
+
+      if (firstRound) {
+        const firstRoundId = String(firstRound.id)
+        setActiveRoundId(firstRoundId)
+
+        const upsertPayload = [
+          { key: 'active_round_id', value: String(firstRound.id) },
+          { key: 'round_name', value: firstRound.name || (`Round ${firstRound.order_index || 1}`) }
+        ]
+
+        const { error: upsertError } = await supabase
+          .from('settings')
+          .upsert(upsertPayload, { onConflict: 'key' })
+
+        if (upsertError) {
+          console.error('Failed to persist default active round:', upsertError)
+        }
+      }
+    } catch (error) {
+      console.log('No active round set yet')
+    }
   }
 
   const handleOpenModal = (category = null) => {
@@ -46,6 +202,7 @@ export default function AdminCompetitionEditor() {
         name: category.name,
         description: category.description || '',
         percentage: category.percentage || '',
+        round_id: category.round_id ? String(category.round_id) : activeRoundId || '',
         criteria: category.criteria || []
       })
     } else {
@@ -54,6 +211,7 @@ export default function AdminCompetitionEditor() {
         name: '',
         description: '',
         percentage: '',
+        round_id: activeRoundId || (rounds[0]?.id ? String(rounds[0].id) : ''),
         criteria: []
       })
     }
@@ -84,11 +242,26 @@ export default function AdminCompetitionEditor() {
     return categoryForm.criteria.reduce((sum, c) => sum + (parseFloat(c.max_points) || 0), 0)
   }
 
-  const getTotalPercentage = () => {
-    return categories.reduce((sum, c) => {
-      if (editingCategory && c.id === editingCategory.id) return sum
-      return sum + (parseFloat(c.percentage) || 0)
-    }, parseFloat(categoryForm.percentage) || 0)
+  const getTotalPercentage = (targetRoundId) => {
+    const roundId = targetRoundId || categoryForm.round_id || activeRoundId
+    const existingTotal = categories.reduce((sum, category) => {
+  const categoryRoundId = category.round_id
+      if (roundId && categoryRoundId !== roundId) return sum
+      if (editingCategory && category.id === editingCategory.id) return sum
+      return sum + (parseFloat(category.percentage) || 0)
+    }, 0)
+
+    const currentValue = parseFloat(categoryForm.percentage) || 0
+    return Math.round((existingTotal + currentValue) * 1000) / 1000
+  }
+
+  const getRoundWeight = (roundId) => {
+    if (!roundId) return categories.reduce((sum, category) => sum + (parseFloat(category.percentage) || 0), 0)
+    return categories.reduce((sum, category) => {
+  const categoryRoundId = category.round_id
+      if (categoryRoundId !== roundId) return sum
+      return sum + (parseFloat(category.percentage) || 0)
+    }, 0)
   }
 
   const handleSaveCategory = async () => {
@@ -102,7 +275,12 @@ export default function AdminCompetitionEditor() {
       return
     }
 
-    const totalPercentage = getTotalPercentage()
+    if (!categoryForm.round_id) {
+      toast.error('Please assign a round to this category')
+      return
+    }
+
+  const totalPercentage = getTotalPercentage(categoryForm.round_id)
     if (totalPercentage > 100) {
       toast.error(`Total percentage cannot exceed 100%. Current total: ${totalPercentage}%`)
       return
@@ -125,7 +303,8 @@ export default function AdminCompetitionEditor() {
           .update({
             name: categoryForm.name,
             description: categoryForm.description,
-            percentage: parseFloat(categoryForm.percentage)
+            percentage: parseFloat(categoryForm.percentage),
+            round_id: categoryForm.round_id
           })
           .eq('id', editingCategory.id)
 
@@ -145,6 +324,7 @@ export default function AdminCompetitionEditor() {
             name: categoryForm.name,
             description: categoryForm.description,
             percentage: parseFloat(categoryForm.percentage),
+            round_id: categoryForm.round_id,
             order_index: categories.length
           })
           .select()
@@ -170,7 +350,13 @@ export default function AdminCompetitionEditor() {
 
       toast.success(`Category ${editingCategory ? 'updated' : 'created'} successfully!`)
       setIsAddModalOpen(false)
-      setCategoryForm({ name: '', description: '', percentage: '', criteria: [] })
+      setCategoryForm({
+        name: '',
+        description: '',
+        percentage: '',
+        round_id: activeRoundId || rounds[0]?.id || '',
+        criteria: []
+      })
       fetchCategories()
     } catch (error) {
       console.error(error)
@@ -246,6 +432,40 @@ export default function AdminCompetitionEditor() {
     fetchCategories()
   }
 
+  const handleSetActiveRound = async (roundId) => {
+    try {
+      setActiveRoundId(String(roundId))
+      await supabase.from('settings').upsert({
+        key: 'active_round_id',
+        value: String(roundId)
+      }, { onConflict: 'key' })
+
+      const round = rounds.find(r => String(r.id) === String(roundId))
+      if (round) {
+        await supabase.from('settings').upsert({
+          key: 'round_name',
+          value: round.name || (`Round ${round.order_index || ''}`).trim()
+        }, { onConflict: 'key' })
+      }
+
+      toast.success('Active round updated for judges and leaderboards')
+    } catch (error) {
+      console.error('Failed to update active round:', error)
+      toast.error('Unable to set active round')
+    }
+  }
+
+  const activeRound = rounds.find(round => String(round.id) === String(activeRoundId)) || rounds[0] || null
+  const activeRoundWeight = activeRound ? Math.round(getRoundWeight(activeRound.id) * 1000) / 1000 : Math.round(getRoundWeight() * 1000) / 1000
+  const activeRoundCategories = activeRound
+    ? categories.filter(category => String(category.round_id) === String(activeRound.id)).length
+    : categories.length
+  const groupedCategories = rounds.map((round) => ({
+    round,
+    categories: categories.filter(category => String(category.round_id) === String(round.id))
+  }))
+  const unassignedCategories = categories.filter(category => !category.round_id)
+
   return (
     <div className="min-h-screen bg-background p-8">
       <Toaster position="top-center" richColors />
@@ -270,33 +490,92 @@ export default function AdminCompetitionEditor() {
           </Button>
         </div>
 
-        {/* Total Percentage Display */}
+        {/* Round Summary */}
         <Card className="bg-card border-border mb-6">
           <CardContent className="py-4">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap gap-6 items-center justify-between">
               <div>
-                <p className="text-sm text-muted-foreground">Total Competition Weight</p>
-                <p className={`text-3xl font-bold ${getTotalPercentage() === 100 ? 'text-green-500' : getTotalPercentage() > 100 ? 'text-red-500' : 'text-primary'}`}>
-                  {getTotalPercentage()}%
+                <p className="text-sm text-muted-foreground">Active Round</p>
+                <p className="text-3xl font-bold text-foreground">
+                  {activeRound ? activeRound.name : 'No round selected'}
+                </p>
+                <p className="text-sm text-muted-foreground flex items-center gap-2 mt-1">
+                  <span>Weight: <span className="font-semibold text-primary">{activeRoundWeight.toFixed(1)}%</span></span>
+                  <span>•</span>
+                  <span>Categories: <span className="font-semibold text-primary">{activeRoundCategories}</span></span>
                 </p>
               </div>
-              <div className="text-right">
-                <p className="text-sm text-muted-foreground">Categories</p>
-                <p className="text-3xl font-bold text-foreground">{categories.length}</p>
+
+              <div className="flex flex-col items-end gap-2">
+                <label className="text-xs text-muted-foreground">Set Active Round</label>
+                <select
+                  value={activeRoundId || ''}
+                  onChange={(e) => handleSetActiveRound(e.target.value)}
+                  className="bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary"
+                >
+                  {rounds.map((round) => (
+                    <option key={round.id} value={round.id}>
+                      {round.name || `Round ${round.order_index}`}
+                    </option>
+                  ))}
+                </select>
+                <p className={`text-xs ${activeRoundWeight === 100 ? 'text-green-500' : activeRoundWeight > 100 ? 'text-red-500' : 'text-muted-foreground'}`}>
+                  {activeRoundWeight === 100
+                    ? 'Round weight complete'
+                    : activeRoundWeight > 100
+                    ? `${(activeRoundWeight - 100).toFixed(1)}% over target`
+                    : `${(100 - activeRoundWeight).toFixed(1)}% remaining`}
+                </p>
               </div>
-              {getTotalPercentage() !== 100 && (
-                <div className="text-right">
-                  <p className="text-sm text-muted-foreground">Remaining</p>
-                  <p className="text-2xl font-bold text-primary">{100 - getTotalPercentage()}%</p>
-                </div>
-              )}
             </div>
           </CardContent>
         </Card>
 
+        {/* Round Overview */}
+        {rounds.length > 0 && (
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+            {rounds.map((round) => {
+              const weight = Math.round(getRoundWeight(round.id) * 10) / 10
+              const count = categories.filter(category => String(category.round_id) === String(round.id)).length
+              const isActive = round.id === activeRound?.id
+              return (
+                <Card key={round.id} className={`border ${isActive ? 'border-primary' : 'border-border'} bg-card` }>
+                  <CardContent className="py-4 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-lg font-bold text-foreground">{round.name || `Round ${round.order_index}`}</h3>
+                      {isActive && (
+                        <span className="text-xs bg-primary/10 text-primary px-2 py-1 rounded-full">Active</span>
+                      )}
+                    </div>
+                    <div className="text-sm text-muted-foreground space-y-2">
+                      <p><span className="font-semibold text-foreground">Weight:</span> {weight}%</p>
+                      <p><span className="font-semibold text-foreground">Categories:</span> {count}</p>
+                      <p><span className="font-semibold text-foreground">Qualifiers:</span> Top {round.advance_per_gender || round.max_per_gender || 'N/A'} per gender</p>
+                      {round.highlight_per_gender && (
+                        <p><span className="font-semibold text-foreground">Highlight:</span> Top {round.highlight_per_gender} per gender</p>
+                      )}
+                    </div>
+                    {!isActive && (
+                      <Button size="sm" variant="outline" onClick={() => handleSetActiveRound(round.id)}>
+                        Set as Active Round
+                      </Button>
+                    )}
+                  </CardContent>
+                </Card>
+              )
+            })}
+          </div>
+        )}
+
         {/* Categories List */}
-        <div className="space-y-4">
-          {categories.length === 0 ? (
+        <div className="space-y-6">
+          {roundsLoading ? (
+            <Card className="bg-card border-border">
+              <CardContent className="py-12 text-center text-muted-foreground">
+                Loading rounds...
+              </CardContent>
+            </Card>
+          ) : categories.length === 0 ? (
             <Card className="bg-card border-border">
               <CardContent className="py-12 text-center">
                 <Plus size={48} className="mx-auto text-muted-foreground mb-4" />
@@ -304,113 +583,186 @@ export default function AdminCompetitionEditor() {
               </CardContent>
             </Card>
           ) : (
-            categories.map((category, index) => (
-              <Card key={category.id} className="bg-card border-border">
-                <CardContent className="py-4">
-                  <div className="space-y-4">
-                    {/* Category Header */}
-                    <div className="flex items-start justify-between">
-                      <div className="flex items-start gap-2 flex-1">
-                        {/* Reorder Buttons */}
-                        <div className="flex flex-col gap-1">
-                          <button
-                            onClick={() => handleMoveCategory(category.id, 'up')}
-                            disabled={index === 0}
-                            className="p-1 hover:bg-secondary rounded disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-                            title="Move up"
-                          >
-                            <ArrowUp size={16} className="text-muted-foreground" />
-                          </button>
-                          <button
-                            onClick={() => handleMoveCategory(category.id, 'down')}
-                            disabled={index === categories.length - 1}
-                            className="p-1 hover:bg-secondary rounded disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-                            title="Move down"
-                          >
-                            <ArrowDown size={16} className="text-muted-foreground" />
-                          </button>
-                        </div>
-                        <GripVertical size={24} className="text-muted-foreground mt-1" />
-                        <div className="flex-1">
-                          <div className="flex items-center gap-3 mb-2">
-                            <h3 className="text-xl font-bold text-foreground">{category.name}</h3>
-                            <span className="text-lg font-bold text-primary">{category.percentage}%</span>
-                          </div>
-                          {category.description && (
-                            <p className="text-sm text-muted-foreground mb-3">{category.description}</p>
-                          )}
-                          
-                          {/* Criteria List */}
-                          <div className="space-y-2">
-                            <p className="text-xs font-bold text-muted-foreground uppercase">Criteria for Judging</p>
-                            {category.criteria && category.criteria.length > 0 ? (
-                              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                                {category.criteria.map((criterion) => (
-                                  <div key={criterion.id} className="flex items-center justify-between bg-secondary/50 px-3 py-2 rounded">
-                                    <span className="text-sm text-foreground">{criterion.name}</span>
-                                    <span className="text-sm font-bold text-primary">{criterion.max_points} pts</span>
-                                  </div>
-                                ))}
-                              </div>
-                            ) : (
-                              <p className="text-sm text-muted-foreground italic">No criteria defined</p>
-                            )}
-                            <div className="flex items-center gap-4 mt-2">
-                              <p className="text-xs text-muted-foreground">
-                                Total: <span className="font-bold text-foreground">
-                                  {category.criteria?.reduce((sum, c) => sum + (c.max_points || 0), 0) || 0}/100 pts
-                                </span>
-                              </p>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* Action Buttons */}
-                      <div className="flex items-center gap-2">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => handleOpenModal(category)}
-                        >
-                          <Edit size={16} className="mr-2" />
-                          Edit
-                        </Button>
-                        <Button
-                          variant="destructive"
-                          size="sm"
-                          onClick={() => handleDeleteCategory(category)}
-                        >
-                          <Trash2 size={16} />
-                        </Button>
-                      </div>
-                    </div>
-
-                    {/* Category Settings */}
-                    <div className="flex items-center gap-6 pt-2 border-t border-border">
-                      <label className="flex items-center gap-2 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={category.is_open || false}
-                          onChange={() => handleToggleOpen(category)}
-                          className="w-4 h-4 rounded border-border text-primary focus:ring-primary"
-                        />
-                        <span className="text-sm text-muted-foreground">Open Category</span>
-                      </label>
-                      <label className="flex items-center gap-2 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={category.is_convention || false}
-                          onChange={() => handleToggleConvention(category)}
-                          className="w-4 h-4 rounded border-border text-primary focus:ring-primary"
-                        />
-                        <span className="text-sm text-muted-foreground">Convention Category</span>
-                      </label>
+            <>
+              {groupedCategories.map(({ round, categories: roundCategories }) => (
+                <div key={round.id} className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-2xl font-bold text-foreground">{round.name || `Round ${round.order_index}`}</h2>
+                    <div className="text-sm text-muted-foreground">
+                      Weight: {Math.round(getRoundWeight(round.id) * 10) / 10}% • Categories: {roundCategories.length}
                     </div>
                   </div>
-                </CardContent>
-              </Card>
-            ))
+
+                  {roundCategories.length === 0 ? (
+                    <Card className="bg-card border-border">
+                      <CardContent className="py-6 text-center text-muted-foreground">
+                        No categories assigned to this round yet.
+                      </CardContent>
+                    </Card>
+                  ) : (
+                    roundCategories.map((category) => {
+                      const index = categories.findIndex(c => c.id === category.id)
+                      return (
+                        <Card key={category.id} className="bg-card border-border">
+                          <CardContent className="py-4">
+                            <div className="space-y-4">
+                              {/* Category Header */}
+                              <div className="flex items-start justify-between">
+                                <div className="flex items-start gap-2 flex-1">
+                                  {/* Reorder Buttons */}
+                                  <div className="flex flex-col gap-1">
+                                    <button
+                                      onClick={() => handleMoveCategory(category.id, 'up')}
+                                      disabled={index === 0}
+                                      className="p-1 hover:bg-secondary rounded disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                                      title="Move up"
+                                    >
+                                      <ArrowUp size={16} className="text-muted-foreground" />
+                                    </button>
+                                    <button
+                                      onClick={() => handleMoveCategory(category.id, 'down')}
+                                      disabled={index === categories.length - 1}
+                                      className="p-1 hover:bg-secondary rounded disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                                      title="Move down"
+                                    >
+                                      <ArrowDown size={16} className="text-muted-foreground" />
+                                    </button>
+                                  </div>
+                                  <GripVertical size={24} className="text-muted-foreground mt-1" />
+                                  <div className="flex-1">
+                                    <div className="flex items-center gap-3 mb-2">
+                                      <h3 className="text-xl font-bold text-foreground">{category.name}</h3>
+                                      <span className="text-lg font-bold text-primary">{category.percentage}%</span>
+                                    </div>
+                                    {category.description && (
+                                      <p className="text-sm text-muted-foreground mb-3">{category.description}</p>
+                                    )}
+                                    
+                                    {/* Criteria List */}
+                                    <div className="space-y-2">
+                                      <p className="text-xs font-bold text-muted-foreground uppercase">Criteria for Judging</p>
+                                      {category.criteria && category.criteria.length > 0 ? (
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                                          {category.criteria.map((criterion) => (
+                                            <div key={criterion.id} className="flex items-center justify-between bg-secondary/50 px-3 py-2 rounded">
+                                              <span className="text-sm text-foreground">{criterion.name}</span>
+                                              <span className="text-sm font-bold text-primary">{criterion.max_points} pts</span>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      ) : (
+                                        <p className="text-sm text-muted-foreground italic">No criteria defined</p>
+                                      )}
+                                      <div className="flex items-center gap-4 mt-2">
+                                        <p className="text-xs text-muted-foreground">
+                                          Total: <span className="font-bold text-foreground">
+                                            {category.criteria?.reduce((sum, c) => sum + (c.max_points || 0), 0) || 0}/100 pts
+                                          </span>
+                                        </p>
+                                      </div>
+                                    </div>
+                                  </div>
+                                </div>
+
+                                {/* Action Buttons */}
+                                <div className="flex items-center gap-2">
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() => handleOpenModal(category)}
+                                  >
+                                    <Edit size={16} className="mr-2" />
+                                    Edit
+                                  </Button>
+                                  <Button
+                                    variant="destructive"
+                                    size="sm"
+                                    onClick={() => handleDeleteCategory(category)}
+                                  >
+                                    <Trash2 size={16} />
+                                  </Button>
+                                </div>
+                              </div>
+
+                              {/* Category Settings */}
+                              <div className="flex items-center gap-6 pt-2 border-t border-border">
+                                <label className="flex items-center gap-2 cursor-pointer">
+                                  <input
+                                    type="checkbox"
+                                    checked={category.is_open || false}
+                                    onChange={() => handleToggleOpen(category)}
+                                    className="w-4 h-4 rounded border-border text-primary focus:ring-primary"
+                                  />
+                                  <span className="text-sm text-muted-foreground">Open Category</span>
+                                </label>
+                                <label className="flex items-center gap-2 cursor-pointer">
+                                  <input
+                                    type="checkbox"
+                                    checked={category.is_convention || false}
+                                    onChange={() => handleToggleConvention(category)}
+                                    className="w-4 h-4 rounded border-border text-primary focus:ring-primary"
+                                  />
+                                  <span className="text-sm text-muted-foreground">Convention Category</span>
+                                </label>
+                              </div>
+                            </div>
+                          </CardContent>
+                        </Card>
+                      )
+                    })
+                  )}
+                </div>
+              ))}
+
+              {unassignedCategories.length > 0 && (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-2xl font-bold text-foreground">Unassigned Categories</h2>
+                    <p className="text-sm text-muted-foreground">Assign these categories to a round to include them in scoring.</p>
+                  </div>
+                  {unassignedCategories.map((category) => {
+                    const index = categories.findIndex(c => c.id === category.id)
+                    return (
+                      <Card key={category.id} className="bg-card border-dashed border-red-400/40">
+                        <CardContent className="py-4">
+                          <div className="flex items-start gap-3">
+                            <div className="flex flex-col gap-1">
+                              <button
+                                onClick={() => handleMoveCategory(category.id, 'up')}
+                                disabled={index === 0}
+                                className="p-1 hover:bg-secondary rounded disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                                title="Move up"
+                              >
+                                <ArrowUp size={16} className="text-muted-foreground" />
+                              </button>
+                              <button
+                                onClick={() => handleMoveCategory(category.id, 'down')}
+                                disabled={index === categories.length - 1}
+                                className="p-1 hover:bg-secondary rounded disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                                title="Move down"
+                              >
+                                <ArrowDown size={16} className="text-muted-foreground" />
+                              </button>
+                            </div>
+                            <div className="flex-1">
+                              <div className="flex items-center gap-3 mb-2">
+                                <h3 className="text-xl font-bold text-foreground">{category.name}</h3>
+                                <span className="text-lg font-bold text-primary">{category.percentage}%</span>
+                                <span className="text-xs bg-red-500/10 text-red-400 px-2 py-1 rounded-full">Assign to round</span>
+                              </div>
+                              <Button variant="outline" size="sm" onClick={() => handleOpenModal(category)}>
+                                <Edit size={16} className="mr-2" />
+                                Edit
+                              </Button>
+                            </div>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    )
+                  })}
+                </div>
+              )}
+            </>
           )}
         </div>
       </div>
@@ -446,6 +798,26 @@ export default function AdminCompetitionEditor() {
             </div>
 
             <div>
+              <Label>Round</Label>
+              <select
+                value={categoryForm.round_id || ''}
+                onChange={(e) => setCategoryForm({ ...categoryForm, round_id: e.target.value })}
+                className="w-full px-3 py-2 border border-border rounded-lg bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-primary"
+                disabled={roundsLoading || rounds.length === 0}
+              >
+                {roundsLoading && <option>Loading rounds...</option>}
+                {!roundsLoading && rounds.map((round) => (
+                  <option key={round.id} value={round.id}>
+                    {round.name || `Round ${round.order_index}`}
+                  </option>
+                ))}
+              </select>
+              <p className="text-xs text-muted-foreground mt-1">
+                Assign this category to its competition round.
+              </p>
+            </div>
+
+            <div>
               <Label>Category Percentage</Label>
               <div className="flex items-center gap-2">
                 <Input
@@ -460,7 +832,7 @@ export default function AdminCompetitionEditor() {
                 <span className="text-lg font-bold text-primary">%</span>
               </div>
               <p className="text-xs text-muted-foreground mt-1">
-                Total percentage: {getTotalPercentage()}% / 100%
+                Round allocation total: {getTotalPercentage(categoryForm.round_id)}% / 100%
               </p>
             </div>
           </div>
