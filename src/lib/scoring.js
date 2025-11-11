@@ -34,24 +34,38 @@ const calculateContestantRoundScore = ({
   scoresIndex,
   judgeCount,
 }) => {
-  const contestantScores = scoresIndex.get(contestant.id) || [];
-  let totalWeightedScore = 0;
-  let totalScoresReceived = 0;
-  const categoryBreakdown = [];
-  const criteriaCount = categories.reduce(
-    (sum, category) => sum + (category.criteria?.length || 0),
-    0
-  );
+  const contestantScoresRaw = scoresIndex.get(contestant.id) || [];
+  const allowedJudgeUnion = new Set();
+  const encounteredJudgeIds = new Set();
+  const perCategoryStats = [];
+
+  let criteriaCount = 0;
 
   categories.forEach((category) => {
     const criteria = category.criteria || [];
-    const criteriaDetails = [];
+    const allowedJudgeIds = category.allowedJudgeIds || [];
+    const allowedJudgeSet = allowedJudgeIds.length
+      ? new Set(allowedJudgeIds.map((id) => String(id)))
+      : null;
+
+    if (allowedJudgeSet) {
+      allowedJudgeSet.forEach((id) => allowedJudgeUnion.add(id));
+    }
+
+    criteriaCount += criteria.length;
+
     let categoryTotal = 0;
+    let categoryScoresReceived = 0;
+    const criteriaDetails = [];
 
     criteria.forEach((criterion) => {
-      const entries = contestantScores.filter(
-        (score) => score.criterion_id === criterion.id
-      );
+      const entries = contestantScoresRaw.filter((score) => {
+        if (score.criterion_id !== criterion.id) return false;
+        if (!allowedJudgeSet) return true;
+        const judgeIdentifier = score.judge_id || score.judgeId;
+        if (!judgeIdentifier) return false;
+        return allowedJudgeSet.has(String(judgeIdentifier));
+      });
 
       if (!entries.length) {
         criteriaDetails.push({
@@ -59,9 +73,17 @@ const calculateContestantRoundScore = ({
           name: criterion.name,
           average: 0,
           maxPoints: criterion.max_points,
+          submissions: 0,
         });
         return;
       }
+
+      entries.forEach((entry) => {
+        const judgeIdentifier = entry.judge_id || entry.judgeId;
+        if (judgeIdentifier) {
+          encounteredJudgeIds.add(String(judgeIdentifier));
+        }
+      });
 
       const sum = entries.reduce(
         (acc, record) => acc + parseFloat(record.score || 0),
@@ -74,10 +96,11 @@ const calculateContestantRoundScore = ({
         name: criterion.name,
         average,
         maxPoints: criterion.max_points,
+        submissions: entries.length,
       });
 
       categoryTotal += average;
-      totalScoresReceived += entries.length;
+      categoryScoresReceived += entries.length;
     });
 
     const categoryMax = criteria.reduce(
@@ -85,32 +108,92 @@ const calculateContestantRoundScore = ({
       0
     );
 
-    const normalized =
-      categoryMax > 0 ? (categoryTotal / categoryMax) * 100 : 0;
-    const weighted = normalized * ((category.percentage || 0) / 100);
-
-    totalWeightedScore += weighted;
-
-    categoryBreakdown.push({
-      id: category.id,
-      name: category.name,
-      normalized,
-      weighted,
-      percentage: category.percentage,
-      criteria: criteriaDetails,
+    perCategoryStats.push({
+      category,
+      criteriaDetails,
+      categoryTotal,
+      categoryScoresReceived,
+      categoryMax,
+      criteriaCount: criteria.length,
     });
   });
 
-  const expectedScores = judgeCount * criteriaCount;
-  const completionRate = expectedScores
-    ? Math.round((totalScoresReceived / expectedScores) * 100)
-    : 0;
+  const fallbackJudgeCount = allowedJudgeUnion.size || encounteredJudgeIds.size;
+
+  const effectiveJudgeCount =
+    Number.isFinite(judgeCount) && judgeCount > 0
+      ? Math.round(judgeCount)
+      : fallbackJudgeCount > 0
+      ? fallbackJudgeCount
+      : null;
+
+  let totalWeightedScore = 0;
+  let totalWeightedScoreRaw = 0;
+  let totalScoresReceived = 0;
+  const categoryBreakdown = [];
+
+  perCategoryStats.forEach(
+    ({
+      category,
+      criteriaDetails,
+      categoryTotal,
+      categoryScoresReceived,
+      categoryMax,
+      criteriaCount: criteriaLength,
+    }) => {
+      totalScoresReceived += categoryScoresReceived;
+
+      const rawNormalized =
+        categoryMax > 0 ? (categoryTotal / categoryMax) * 100 : 0;
+      const rawWeighted = rawNormalized * ((category.percentage || 0) / 100);
+
+      const expectedCategoryScores = effectiveJudgeCount
+        ? effectiveJudgeCount * criteriaLength
+        : categoryScoresReceived;
+
+      const categoryCompletionRatio =
+        expectedCategoryScores > 0
+          ? Math.min(categoryScoresReceived / expectedCategoryScores, 1)
+          : 0;
+
+      const normalized = rawNormalized * categoryCompletionRatio;
+      const weighted = rawWeighted * categoryCompletionRatio;
+
+      totalWeightedScoreRaw += rawWeighted;
+      totalWeightedScore += weighted;
+
+      categoryBreakdown.push({
+        id: category.id,
+        name: category.name,
+        normalized,
+        rawNormalized,
+        weighted,
+        rawWeighted,
+        completionRatio: categoryCompletionRatio,
+        percentage: category.percentage,
+        criteria: criteriaDetails,
+        submissions: categoryScoresReceived,
+        expectedSubmissions: expectedCategoryScores,
+      });
+    }
+  );
+
+  const expectedScores = effectiveJudgeCount
+    ? effectiveJudgeCount * criteriaCount
+    : totalScoresReceived;
+
+  const completionRatio =
+    expectedScores > 0 ? Math.min(totalScoresReceived / expectedScores, 1) : 0;
+
+  const completionRate = Math.round(completionRatio * 100);
 
   return {
     totalWeightedScore,
+    totalWeightedScoreRaw,
     totalScoresReceived,
     expectedScores,
     completionRate,
+    completionRatio,
     categoryBreakdown,
   };
 };
@@ -218,35 +301,83 @@ export const computeCompetitionStandings = ({
   scores = [],
   rounds = [],
   judges = [],
+  roundJudgeTargets = {},
+  roundJudgeAssignments = {},
 }) => {
-  const judgeCount = judges.length || 0;
+  const normalizedTargets = Object.entries(roundJudgeTargets || {}).reduce(
+    (acc, [key, value]) => {
+      const numeric = Number(value);
+      if (Number.isFinite(numeric) && numeric > 0) {
+        acc[String(key)] = numeric;
+      }
+      return acc;
+    },
+    {}
+  );
+
+  const activeJudgeIds = new Set(
+    (judges || [])
+      .filter((judge) => judge == null || judge.active !== false)
+      .map((judge) => String(judge.id))
+  );
+
+  const normalizedAssignments = Object.entries(
+    roundJudgeAssignments || {}
+  ).reduce((acc, [roundId, judgeIds]) => {
+    const idsArray = Array.isArray(judgeIds)
+      ? judgeIds.map((id) => String(id))
+      : [];
+    const active = idsArray.filter((id) => activeJudgeIds.has(id));
+    acc[String(roundId)] = {
+      all: idsArray,
+      active,
+    };
+    return acc;
+  }, {});
+
+  const activeJudgeCount = activeJudgeIds.size || judges.length || 0;
+  const maxAssignmentCount = Object.values(normalizedAssignments).reduce(
+    (max, info) => (info.active.length > max ? info.active.length : max),
+    0
+  );
+  const fallbackTargetCount = Object.values(normalizedTargets).reduce(
+    (max, current) => (current > max ? current : max),
+    0
+  );
+  const effectiveOverallJudgeCount =
+    maxAssignmentCount || fallbackTargetCount || activeJudgeCount;
   const scoresIndex = buildScoresIndex(scores);
   const roundsSorted = [...rounds].sort(
     (a, b) => (a.order_index || 0) - (b.order_index || 0)
   );
 
-  const categoriesByRound = new Map();
-  categories.forEach((category) => {
+  const normalizedCategories = (categories || []).map((category) => {
     const roundId = category.round_id || category.round?.id || null;
     const roundKey = roundId ? String(roundId) : null;
-    if (!roundKey) return;
-    const normalizedCategory = {
+    const assignmentInfo = roundKey ? normalizedAssignments[roundKey] : null;
+    return {
       ...category,
       round_id: roundKey,
+      allowedJudgeIds: assignmentInfo?.active || [],
     };
-    if (!categoriesByRound.has(roundKey)) {
-      categoriesByRound.set(roundKey, []);
+  });
+
+  const categoriesByRound = new Map();
+  normalizedCategories.forEach((category) => {
+    if (!category.round_id) return;
+    if (!categoriesByRound.has(category.round_id)) {
+      categoriesByRound.set(category.round_id, []);
     }
-    categoriesByRound.get(roundKey).push(normalizedCategory);
+    categoriesByRound.get(category.round_id).push(category);
   });
 
   const overallTotals = contestants
     .map((contestant) => {
       const totals = calculateContestantRoundScore({
         contestant,
-        categories,
+        categories: normalizedCategories,
         scoresIndex,
-        judgeCount,
+        judgeCount: effectiveOverallJudgeCount,
       });
       const gender = normalizeGender(contestant.sex || contestant.gender);
       return {
@@ -279,6 +410,20 @@ export const computeCompetitionStandings = ({
   const roundsData = [];
 
   roundsSorted.forEach((round) => {
+    const roundKey = String(round.id);
+    const assignmentInfo = normalizedAssignments[roundKey];
+    let judgeCountForRound = effectiveOverallJudgeCount;
+
+    if (assignmentInfo) {
+      if (assignmentInfo.active.length > 0) {
+        judgeCountForRound = assignmentInfo.active.length;
+      } else if (assignmentInfo.all.length > 0) {
+        judgeCountForRound = 0;
+      }
+    } else if (normalizedTargets[roundKey]) {
+      judgeCountForRound = normalizedTargets[roundKey];
+    }
+
     const categoriesForRound = categoriesByRound.get(String(round.id)) || [];
     const limits = buildGenderLimits(round);
 
@@ -287,7 +432,7 @@ export const computeCompetitionStandings = ({
       categories: categoriesForRound,
       contestants: currentContestants,
       scoresIndex,
-      judgeCount,
+      judgeCount: judgeCountForRound,
     });
 
     const limitedByGender = {};
@@ -309,6 +454,8 @@ export const computeCompetitionStandings = ({
       round,
       rankings,
       byGender: annotatedByGender,
+      judgeCount: judgeCountForRound,
+      assignedJudgeIds: assignmentInfo?.active || [],
       participants: limitedByGender,
     });
 

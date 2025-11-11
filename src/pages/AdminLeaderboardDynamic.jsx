@@ -13,6 +13,7 @@ export default function AdminLeaderboardDynamic() {
   const [rounds, setRounds] = useState([])
   const [scores, setScores] = useState([])
   const [judges, setJudges] = useState([])
+  const [roundAssignments, setRoundAssignments] = useState([])
   const [isLocked, setIsLocked] = useState(false)
   const [standings, setStandings] = useState({ overall: { rankings: [], byGender: {} }, rounds: [] })
   const [selectedRoundId, setSelectedRoundId] = useState('overall')
@@ -43,18 +44,33 @@ export default function AdminLeaderboardDynamic() {
 
   useEffect(() => {
     if (!contestants.length || !categories.length) return
+    const assignmentsMap = roundAssignments.reduce((acc, record) => {
+      const roundId = record.round_id ? String(record.round_id) : null
+      const judgeId = record.judge_id ? String(record.judge_id) : null
+      if (!roundId || !judgeId) return acc
+      if (!acc[roundId]) {
+        acc[roundId] = new Set()
+      }
+      acc[roundId].add(judgeId)
+      return acc
+    }, {})
+    const normalizedAssignments = Object.entries(assignmentsMap).reduce((result, [roundId, judgeSet]) => {
+      result[roundId] = Array.from(judgeSet)
+      return result
+    }, {})
     const computed = computeCompetitionStandings({
       contestants,
       categories,
       scores,
       rounds,
-      judges
+      judges,
+      roundJudgeAssignments: normalizedAssignments
     })
     setStandings(computed)
-  }, [contestants, categories, scores, rounds, judges])
+  }, [contestants, categories, scores, rounds, judges, roundAssignments])
 
   const fetchData = async () => {
-    const [contestantsRes, scoresRes, judgesRes, categoriesRes, roundsRes] = await Promise.all([
+    const [contestantsRes, scoresRes, judgesRes, categoriesRes, roundsRes, roundAssignmentsRes] = await Promise.all([
       supabase.from('contestants').select('*').order('number'),
       supabase.from('contestant_scores').select('*'),
       supabase.from('judges').select('*').eq('active', true),
@@ -62,7 +78,8 @@ export default function AdminLeaderboardDynamic() {
         .from('categories')
         .select('*, round:rounds(*), criteria(*)')
         .order('order_index'),
-      supabase.from('rounds').select('*').order('order_index')
+      supabase.from('rounds').select('*').order('order_index'),
+      supabase.from('round_judges').select('round_id, judge_id')
     ])
 
     const contestantsData = contestantsRes.data || []
@@ -74,6 +91,7 @@ export default function AdminLeaderboardDynamic() {
     setJudges(judgesRes.data || [])
     setCategories(categoriesData)
     setRounds(roundsData)
+    setRoundAssignments(roundAssignmentsRes.data || [])
 
     if (selectedRoundId !== 'overall' && !roundsData.some((round) => round.id === selectedRoundId)) {
       setSelectedRoundId('overall')

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { supabase } from '@/lib/supabase'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
@@ -12,11 +12,21 @@ import { Link } from 'react-router-dom'
 export default function AdminCompetitionEditor() {
   const [categories, setCategories] = useState([])
   const [rounds, setRounds] = useState([])
+  const [judges, setJudges] = useState([])
   const [activeRoundId, setActiveRoundId] = useState(null)
   const [isAddModalOpen, setIsAddModalOpen] = useState(false)
   const [editingCategory, setEditingCategory] = useState(null)
   const [loading, setLoading] = useState(false)
   const [roundsLoading, setRoundsLoading] = useState(true)
+  const [isRoundModalOpen, setIsRoundModalOpen] = useState(false)
+  const [roundForm, setRoundForm] = useState({
+    id: '',
+    name: '',
+    judge_target: '',
+    max_per_gender: '',
+    advance_per_gender: '',
+    highlight_per_gender: ''
+  })
   
   // Form state for category
   const [categoryForm, setCategoryForm] = useState({
@@ -32,11 +42,50 @@ export default function AdminCompetitionEditor() {
 
   useEffect(() => {
     const initialize = async () => {
+      await fetchJudges()
       await fetchRounds()
       await fetchActiveRound()
     }
 
     initialize()
+  }, [])
+
+  useEffect(() => {
+    const assignmentsChannel = supabase
+      .channel('admin-round-judges-tracker', {
+        config: { broadcast: { self: true } }
+      })
+      .on('postgres_changes', {
+        event: '*',
+        schema: 'public',
+        table: 'round_judges'
+      }, () => {
+        fetchRounds()
+      })
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(assignmentsChannel)
+    }
+  }, [])
+
+  useEffect(() => {
+    const judgesChannel = supabase
+      .channel('admin-judges-tracker', {
+        config: { broadcast: { self: true } }
+      })
+      .on('postgres_changes', {
+        event: '*',
+        schema: 'public',
+        table: 'judges'
+      }, () => {
+        fetchJudges()
+      })
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(judgesChannel)
+    }
   }, [])
 
   useEffect(() => {
@@ -74,25 +123,163 @@ export default function AdminCompetitionEditor() {
     setCategories(categoriesWithRounds)
   }
 
+  const sanitizeCount = (value) => {
+    if (value === '' || value === null || value === undefined) return null
+    const numeric = Number(value)
+    if (!Number.isFinite(numeric) || numeric < 0) return null
+    return Math.round(numeric)
+  }
+
+  const fetchJudges = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('judges')
+        .select('id, active')
+
+      if (error) throw error
+
+      setJudges(data || [])
+    } catch (error) {
+      console.error('Failed to fetch judges:', error)
+      setJudges([])
+    }
+  }
+
+  const resetRoundForm = () => {
+    setRoundForm({
+      id: '',
+      name: '',
+      judge_target: '',
+      max_per_gender: '',
+      advance_per_gender: '',
+      highlight_per_gender: ''
+    })
+  }
+
+  const handleOpenRoundModal = (round = null) => {
+    if (!round) {
+      resetRoundForm()
+      setIsRoundModalOpen(true)
+      return
+    }
+
+    setRoundForm({
+      id: round.id,
+      name: round.name || '',
+      judge_target:
+        round.judge_target === null || round.judge_target === undefined
+          ? ''
+          : round.judge_target,
+      max_per_gender:
+        round.max_per_gender === null || round.max_per_gender === undefined
+          ? ''
+          : round.max_per_gender,
+      advance_per_gender:
+        round.advance_per_gender === null || round.advance_per_gender === undefined
+          ? ''
+          : round.advance_per_gender,
+      highlight_per_gender:
+        round.highlight_per_gender === null || round.highlight_per_gender === undefined
+          ? ''
+          : round.highlight_per_gender
+    })
+    setIsRoundModalOpen(true)
+  }
+
+  const handleRoundInputChange = (field, value) => {
+    setRoundForm((prev) => ({
+      ...prev,
+      [field]: value
+    }))
+  }
+
+  const handleSaveRoundSettings = async () => {
+    if (!roundForm.name.trim()) {
+      toast.error('Please provide a round name')
+      return
+    }
+
+    const payload = {
+      name: roundForm.name.trim(),
+      judge_target: sanitizeCount(roundForm.judge_target),
+      max_per_gender: sanitizeCount(roundForm.max_per_gender),
+      advance_per_gender: sanitizeCount(roundForm.advance_per_gender),
+      highlight_per_gender: sanitizeCount(roundForm.highlight_per_gender)
+    }
+
+    try {
+      if (roundForm.id) {
+        const { error } = await supabase
+          .from('rounds')
+          .update(payload)
+          .eq('id', roundForm.id)
+
+        if (error) {
+          throw error
+        }
+
+        toast.success('Round configuration updated')
+      } else {
+        const nextOrderIndex = rounds.reduce((max, current) => {
+          const orderValue = Number(current.order_index) || 0
+          return orderValue > max ? orderValue : max
+        }, 0) + 1
+
+        const { error } = await supabase
+          .from('rounds')
+          .insert({
+            ...payload,
+            order_index: nextOrderIndex
+          })
+
+        if (error) {
+          throw error
+        }
+
+        toast.success('Round created successfully')
+      }
+    } catch (error) {
+      console.error('Failed to save round:', error)
+      const message = error?.message || error?.details || 'Unable to save round configuration'
+      toast.error(message)
+      return
+    }
+
+    setIsRoundModalOpen(false)
+    resetRoundForm()
+    fetchRounds()
+  }
+
   const ensureDefaultRounds = async () => {
     const defaultRounds = [
       {
-        name: 'Preliminary Competition',
+        name: 'Preliminary Showcase',
         order_index: 1,
+        judge_target: 12,
         max_per_gender: null,
-        advance_per_gender: 8,
+        advance_per_gender: 10,
         highlight_per_gender: null
       },
       {
-        name: 'Coronation Night',
+        name: 'Semifinal Performance',
         order_index: 2,
-        max_per_gender: 8,
-        advance_per_gender: 3,
-        highlight_per_gender: 5
+        judge_target: 10,
+        max_per_gender: 10,
+        advance_per_gender: 6,
+        highlight_per_gender: 6
       },
       {
-        name: 'Final Round Coronation Night',
+        name: 'Final Evening Gown',
         order_index: 3,
+        judge_target: 8,
+        max_per_gender: 6,
+        advance_per_gender: 3,
+        highlight_per_gender: 3
+      },
+      {
+        name: 'Crowning Q&A',
+        order_index: 4,
+        judge_target: 7,
         max_per_gender: 3,
         advance_per_gender: null,
         highlight_per_gender: 3
@@ -114,6 +301,31 @@ export default function AdminCompetitionEditor() {
 
       let roundsData = data || []
 
+      let assignmentRows = []
+      const { data: assignmentData, error: assignmentError } = await supabase
+        .from('round_judges')
+        .select('round_id, judge_id')
+
+      if (assignmentError) {
+        console.error('Failed to fetch round judge assignments:', assignmentError)
+      } else {
+        assignmentRows = assignmentData || []
+      }
+
+      const assignmentsMap = assignmentRows.reduce((acc, record) => {
+        const roundId = record?.round_id
+        const judgeId = record?.judge_id
+        if (!roundId || !judgeId) {
+          return acc
+        }
+        const key = String(roundId)
+        if (!acc[key]) {
+          acc[key] = new Set()
+        }
+        acc[key].add(String(judgeId))
+        return acc
+      }, {})
+
       if (!roundsData.length) {
         await ensureDefaultRounds()
         const { data: refreshed } = await supabase
@@ -122,6 +334,27 @@ export default function AdminCompetitionEditor() {
           .order('order_index')
         roundsData = refreshed || []
       }
+
+      roundsData = roundsData.map((round) => ({
+        ...round,
+        judge_target:
+          round.judge_target === null || round.judge_target === undefined
+            ? null
+            : Number(round.judge_target),
+        assignedJudgeIds: Array.from(assignmentsMap[String(round.id)] || []),
+        max_per_gender:
+          round.max_per_gender === null || round.max_per_gender === undefined
+            ? null
+            : Number(round.max_per_gender),
+        advance_per_gender:
+          round.advance_per_gender === null || round.advance_per_gender === undefined
+            ? null
+            : Number(round.advance_per_gender),
+        highlight_per_gender:
+          round.highlight_per_gender === null || round.highlight_per_gender === undefined
+            ? null
+            : Number(round.highlight_per_gender)
+      }))
 
       setRounds(roundsData)
     } catch (error) {
@@ -460,6 +693,10 @@ export default function AdminCompetitionEditor() {
   const activeRoundCategories = activeRound
     ? categories.filter(category => String(category.round_id) === String(activeRound.id)).length
     : categories.length
+  const activeJudgeCount = judges.filter((judge) => judge.active).length
+  const activeJudgeIds = useMemo(() => new Set(judges.filter((judge) => judge.active).map((judge) => String(judge.id))), [judges])
+  const activeRoundAssignedIds = Array.isArray(activeRound?.assignedJudgeIds) ? activeRound.assignedJudgeIds : []
+  const activeRoundActiveAssignments = activeRoundAssignedIds.filter((id) => activeJudgeIds.has(String(id))).length
   const groupedCategories = rounds.map((round) => ({
     round,
     categories: categories.filter(category => String(category.round_id) === String(round.id))
@@ -484,10 +721,16 @@ export default function AdminCompetitionEditor() {
               <p className="text-muted-foreground">Customize categories and scoring criteria</p>
             </div>
           </div>
-          <Button onClick={() => handleOpenModal()} size="lg">
-            <Plus className="mr-2" size={20} />
-            Add Category
-          </Button>
+          <div className="flex items-center gap-3">
+            <Button variant="outline" onClick={() => handleOpenRoundModal()} size="lg">
+              <Plus className="mr-2" size={20} />
+              Add Round
+            </Button>
+            <Button onClick={() => handleOpenModal()} size="lg">
+              <Plus className="mr-2" size={20} />
+              Add Category
+            </Button>
+          </div>
         </div>
 
         {/* Round Summary */}
@@ -526,6 +769,14 @@ export default function AdminCompetitionEditor() {
                     ? `${(activeRoundWeight - 100).toFixed(1)}% over target`
                     : `${(100 - activeRoundWeight).toFixed(1)}% remaining`}
                 </p>
+                <p className="text-xs text-muted-foreground">
+                  Active judges available: {activeJudgeCount}
+                </p>
+                {activeRoundAssignedIds.length > 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    Assigned judges (active): {activeRoundActiveAssignments}/{activeRoundAssignedIds.length}
+                  </p>
+                )}
               </div>
             </div>
           </CardContent>
@@ -538,6 +789,8 @@ export default function AdminCompetitionEditor() {
               const weight = Math.round(getRoundWeight(round.id) * 10) / 10
               const count = categories.filter(category => String(category.round_id) === String(round.id)).length
               const isActive = round.id === activeRound?.id
+              const assignedIds = Array.isArray(round.assignedJudgeIds) ? round.assignedJudgeIds : []
+              const activeAssignedCount = assignedIds.filter((id) => activeJudgeIds.has(String(id))).length
               return (
                 <Card key={round.id} className={`border ${isActive ? 'border-primary' : 'border-border'} bg-card` }>
                   <CardContent className="py-4 space-y-3">
@@ -550,16 +803,29 @@ export default function AdminCompetitionEditor() {
                     <div className="text-sm text-muted-foreground space-y-2">
                       <p><span className="font-semibold text-foreground">Weight:</span> {weight}%</p>
                       <p><span className="font-semibold text-foreground">Categories:</span> {count}</p>
+                      <p><span className="font-semibold text-foreground">Judge Allocation:</span> {round.judge_target ? `${round.judge_target} judges` : 'All active judges'}</p>
+                      <p className="text-xs text-muted-foreground">Active judges right now: {activeJudgeCount}</p>
+                      {assignedIds.length > 0 && (
+                        <p className="text-xs text-muted-foreground">
+                          Assigned judges (active): {activeAssignedCount}/{assignedIds.length}
+                        </p>
+                      )}
                       <p><span className="font-semibold text-foreground">Qualifiers:</span> Top {round.advance_per_gender || round.max_per_gender || 'N/A'} per gender</p>
                       {round.highlight_per_gender && (
                         <p><span className="font-semibold text-foreground">Highlight:</span> Top {round.highlight_per_gender} per gender</p>
                       )}
                     </div>
-                    {!isActive && (
-                      <Button size="sm" variant="outline" onClick={() => handleSetActiveRound(round.id)}>
-                        Set as Active Round
+                    <div className="flex flex-wrap gap-2">
+                      <Button size="sm" variant="outline" onClick={() => handleOpenRoundModal(round)}>
+                        <Edit size={16} className="mr-2" />
+                        Edit Round
                       </Button>
-                    )}
+                      {!isActive && (
+                        <Button size="sm" variant="outline" onClick={() => handleSetActiveRound(round.id)}>
+                          Set as Active Round
+                        </Button>
+                      )}
+                    </div>
                   </CardContent>
                 </Card>
               )
@@ -909,6 +1175,95 @@ export default function AdminCompetitionEditor() {
               {loading ? 'Saving...' : 'Save Changes'}
             </Button>
             <Button variant="outline" onClick={() => setIsAddModalOpen(false)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal
+        isOpen={isRoundModalOpen}
+        onClose={() => {
+          setIsRoundModalOpen(false)
+          resetRoundForm()
+        }}
+  title={roundForm.id ? 'Edit Round' : 'Add Round'}
+        size="md"
+      >
+        <div className="space-y-6">
+          <div className="space-y-4">
+            <div>
+              <Label>Round Name</Label>
+              <Input
+                placeholder="e.g., Preliminary Showcase"
+                value={roundForm.name}
+                onChange={(e) => handleRoundInputChange('name', e.target.value)}
+              />
+            </div>
+
+            <div>
+              <Label>Judge Allocation (optional)</Label>
+              <div className="flex items-center gap-2">
+                <Input
+                  type="number"
+                  min="0"
+                  placeholder="e.g., 10"
+                  value={roundForm.judge_target}
+                  onChange={(e) => handleRoundInputChange('judge_target', e.target.value)}
+                />
+                <span className="text-sm text-muted-foreground">judges</span>
+              </div>
+              <p className="text-xs text-muted-foreground mt-1">
+                Leave blank to use all active judges for this round (currently {activeJudgeCount}).
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div>
+                <Label>Max Participants</Label>
+                <Input
+                  type="number"
+                  min="0"
+                  placeholder="e.g., 12"
+                  value={roundForm.max_per_gender}
+                  onChange={(e) => handleRoundInputChange('max_per_gender', e.target.value)}
+                />
+              </div>
+              <div>
+                <Label>Advance per Gender</Label>
+                <Input
+                  type="number"
+                  min="0"
+                  placeholder="e.g., 6"
+                  value={roundForm.advance_per_gender}
+                  onChange={(e) => handleRoundInputChange('advance_per_gender', e.target.value)}
+                />
+              </div>
+              <div>
+                <Label>Highlight per Gender</Label>
+                <Input
+                  type="number"
+                  min="0"
+                  placeholder="e.g., 3"
+                  value={roundForm.highlight_per_gender}
+                  onChange={(e) => handleRoundInputChange('highlight_per_gender', e.target.value)}
+                />
+              </div>
+            </div>
+          </div>
+
+          <div className="flex gap-2">
+            <Button onClick={handleSaveRoundSettings} className="flex-1">
+              <Save size={16} className="mr-2" />
+              Save Round
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setIsRoundModalOpen(false)
+                resetRoundForm()
+              }}
+            >
               Cancel
             </Button>
           </div>

@@ -7,7 +7,7 @@ import { Input } from '@/components/ui/Input'
 import { Label } from '@/components/ui/Label'
 import Modal from '@/components/ui/Modal'
 import { toast } from 'sonner'
-import { UserPlus, Copy, Trash2, Power, Link as LinkIcon } from 'lucide-react'
+import { UserPlus, Copy, Trash2, Power, Link as LinkIcon, ClipboardList, CheckSquare } from 'lucide-react'
 
 function JudgeModal({ isOpen, onClose, onSuccess }) {
   const [judgeName, setJudgeName] = useState('')
@@ -80,33 +80,158 @@ function JudgeModal({ isOpen, onClose, onSuccess }) {
   )
 }
 
+function JudgeRoundsModal({ isOpen, judge, rounds, selectedRoundIds, onSave, onClose }) {
+  const [selection, setSelection] = useState([])
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    if (isOpen) {
+      setSelection(selectedRoundIds || [])
+    }
+  }, [isOpen, selectedRoundIds])
+
+  const toggleRound = (roundId) => {
+    setSelection((prev) => {
+      const exists = prev.includes(roundId)
+      if (exists) {
+        return prev.filter((id) => id !== roundId)
+      }
+      return [...prev, roundId]
+    })
+  }
+
+  const handleSave = async () => {
+    setSaving(true)
+    try {
+      await onSave(selection)
+      onClose()
+    } catch (error) {
+      console.error('Failed to save judge assignments:', error)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Modal
+      isOpen={isOpen}
+      onClose={onClose}
+      title={judge ? `Assign Rounds to ${judge.name}` : 'Assign Rounds'}
+      size="md"
+    >
+      <div className="space-y-4">
+        <p className="text-sm text-gray-600">
+          Choose which rounds this judge is responsible for. Judges only contribute scores to the rounds selected here.
+        </p>
+
+        <div className="space-y-2">
+          {rounds.length === 0 ? (
+            <p className="text-sm text-gray-500">No rounds available. Create rounds in the Competition Editor first.</p>
+          ) : (
+            rounds.map((round) => {
+              const roundId = String(round.id)
+              const checked = selection.includes(roundId)
+              return (
+                <label
+                  key={roundId}
+                  className="flex items-center justify-between gap-3 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 hover:border-blue-400 transition"
+                >
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="checkbox"
+                      className="w-4 h-4"
+                      checked={checked}
+                      onChange={() => toggleRound(roundId)}
+                    />
+                    <div>
+                      <p className="text-sm font-semibold text-gray-800">{round.name || `Round ${round.order_index}`}</p>
+                      <p className="text-xs text-gray-500">Order #{round.order_index || '-'}</p>
+                    </div>
+                  </div>
+                  {checked && <CheckSquare size={18} className="text-blue-500" />}
+                </label>
+              )
+            })
+          )}
+        </div>
+
+        <div className="flex gap-2 pt-4">
+          <Button type="button" variant="outline" onClick={onClose} className="flex-1">
+            Cancel
+          </Button>
+          <Button onClick={handleSave} disabled={saving} className="flex-1">
+            {saving ? 'Saving...' : 'Save Assignments'}
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  )
+}
+
 export default function JudgesList() {
   const [judges, setJudges] = useState([])
+  const [rounds, setRounds] = useState([])
+  const [roundAssignments, setRoundAssignments] = useState({})
   const [isModalOpen, setIsModalOpen] = useState(false)
+  const [isAssignmentsModalOpen, setIsAssignmentsModalOpen] = useState(false)
+  const [editingJudge, setEditingJudge] = useState(null)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    fetchJudges()
+    fetchData()
     
     // Subscribe to realtime updates
     const subscription = supabase
       .channel('judges-changes')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'judges' }, () => {
-        fetchJudges()
+        fetchData()
       })
       .subscribe()
 
-    return () => subscription.unsubscribe()
+    const assignmentsSubscription = supabase
+      .channel('round-judges-changes')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'round_judges' }, () => {
+        fetchData()
+      })
+      .subscribe()
+
+    return () => {
+      subscription.unsubscribe()
+      assignmentsSubscription.unsubscribe()
+    }
   }, [])
 
-  const fetchJudges = async () => {
+  const fetchData = async () => {
     setLoading(true)
-    const { data } = await supabase
-      .from('judges')
-      .select('*')
-      .order('created_at', { ascending: false })
+    const [judgesRes, roundsRes, assignmentsRes] = await Promise.all([
+      supabase.from('judges').select('*').order('created_at', { ascending: false }),
+      supabase.from('rounds').select('*').order('order_index'),
+      supabase.from('round_judges').select('round_id, judge_id')
+    ])
 
-    setJudges(data || [])
+    const judgesData = judgesRes.data || []
+    const roundsData = roundsRes.data || []
+    const assignmentsData = assignmentsRes.data || []
+
+    const assignmentsMap = assignmentsData.reduce((acc, record) => {
+      const judgeId = record.judge_id ? String(record.judge_id) : null
+      const roundId = record.round_id ? String(record.round_id) : null
+      if (!judgeId || !roundId) return acc
+      if (!acc[judgeId]) {
+        acc[judgeId] = new Set()
+      }
+      acc[judgeId].add(roundId)
+      return acc
+    }, {})
+
+    const normalizedAssignments = Object.entries(assignmentsMap).reduce((result, [judgeId, roundSet]) => {
+      result[judgeId] = Array.from(roundSet)
+      return result
+    }, {})
+
+    setJudges(judgesData)
+    setRounds(roundsData)
+    setRoundAssignments(normalizedAssignments)
     setLoading(false)
   }
 
@@ -146,6 +271,53 @@ export default function JudgesList() {
     }
 
     toast.success('Judge deleted successfully')
+  }
+
+  const openAssignmentsModal = (judge) => {
+    setEditingJudge(judge)
+    setIsAssignmentsModalOpen(true)
+  }
+
+  const handleSaveAssignments = async (selectedRoundIds) => {
+    if (!editingJudge) return
+
+    const judgeId = String(editingJudge.id)
+    const currentAssignments = new Set(roundAssignments[judgeId] || [])
+    const nextAssignments = new Set(selectedRoundIds.map((id) => String(id)))
+
+    const toInsert = [...nextAssignments].filter((roundId) => !currentAssignments.has(roundId))
+    const toDelete = [...currentAssignments].filter((roundId) => !nextAssignments.has(roundId))
+
+    try {
+      if (toInsert.length) {
+        const insertPayload = toInsert.map((roundId) => ({
+          judge_id: editingJudge.id,
+          round_id: rounds.find((round) => String(round.id) === roundId)?.id || roundId
+        }))
+
+        const { error: insertError } = await supabase
+          .from('round_judges')
+          .upsert(insertPayload, { onConflict: 'round_id,judge_id' })
+
+        if (insertError) throw insertError
+      }
+
+      if (toDelete.length) {
+        const { error: deleteError } = await supabase
+          .from('round_judges')
+          .delete()
+          .eq('judge_id', editingJudge.id)
+          .in('round_id', toDelete.map((roundId) => rounds.find((round) => String(round.id) === roundId)?.id || roundId))
+
+        if (deleteError) throw deleteError
+      }
+
+      toast.success('Judge assignments updated')
+      await fetchData()
+    } catch (error) {
+      console.error('Failed to update judge assignments:', error)
+      toast.error('Unable to update judge assignments')
+    }
   }
 
   return (
@@ -222,6 +394,32 @@ export default function JudgesList() {
                         /judge/{judge.url_token.substring(0, 8)}...
                       </code>
                     </div>
+                    <div className="mt-3 space-y-2">
+                      <p className="text-xs font-semibold text-gray-500 uppercase flex items-center gap-2">
+                        <ClipboardList size={14} /> Assigned Rounds
+                      </p>
+                      {(() => {
+                        const assignedIds = roundAssignments[String(judge.id)] || []
+                        if (!assignedIds.length) {
+                          return <p className="text-xs text-gray-500">No rounds assigned</p>
+                        }
+                        const badges = assignedIds
+                          .map((roundId) => rounds.find((round) => String(round.id) === roundId))
+                          .filter(Boolean)
+                        return (
+                          <div className="flex flex-wrap gap-2">
+                            {badges.map((round) => (
+                              <span
+                                key={round.id}
+                                className="px-2 py-1 text-xs font-medium rounded-full bg-blue-50 text-blue-600 border border-blue-200"
+                              >
+                                {round.name || `Round ${round.order_index}`}
+                              </span>
+                            ))}
+                          </div>
+                        )
+                      })()}
+                    </div>
                   </div>
 
                   {/* Actions */}
@@ -233,6 +431,14 @@ export default function JudgesList() {
                     >
                       <Copy size={16} className="mr-1" />
                       Copy Link
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => openAssignmentsModal(judge)}
+                    >
+                      <ClipboardList size={16} className="mr-1" />
+                      Assign Rounds
                     </Button>
                     <Button
                       variant="outline"
@@ -260,7 +466,19 @@ export default function JudgesList() {
       <JudgeModal
         isOpen={isModalOpen}
         onClose={() => setIsModalOpen(false)}
-        onSuccess={fetchJudges}
+        onSuccess={fetchData}
+      />
+
+      <JudgeRoundsModal
+        isOpen={isAssignmentsModalOpen}
+        judge={editingJudge}
+        rounds={rounds}
+        selectedRoundIds={editingJudge ? roundAssignments[String(editingJudge.id)] || [] : []}
+        onSave={handleSaveAssignments}
+        onClose={() => {
+          setIsAssignmentsModalOpen(false)
+          setEditingJudge(null)
+        }}
       />
     </div>
   )

@@ -9,6 +9,7 @@ export default function RankingPage() {
   const [rounds, setRounds] = useState([])
   const [scores, setScores] = useState([])
   const [judges, setJudges] = useState([])
+  const [roundAssignments, setRoundAssignments] = useState([])
   const [standings, setStandings] = useState({ overall: { rankings: [], byGender: {} }, rounds: [] })
   const [selectedRoundId, setSelectedRoundId] = useState('overall')
   const [loading, setLoading] = useState(true)
@@ -30,21 +31,45 @@ export default function RankingPage() {
 
   useEffect(() => {
     if (!contestants.length || !categories.length) return
+    const roundJudgeTargets = rounds.reduce((acc, round) => {
+      if (!round?.id) return acc
+      const numeric = Number(round.judge_target)
+      if (Number.isFinite(numeric) && numeric > 0) {
+        acc[String(round.id)] = numeric
+      }
+      return acc
+    }, {})
+    const assignmentsMap = roundAssignments.reduce((acc, record) => {
+      const roundId = record.round_id ? String(record.round_id) : null
+      const judgeId = record.judge_id ? String(record.judge_id) : null
+      if (!roundId || !judgeId) return acc
+      if (!acc[roundId]) {
+        acc[roundId] = new Set()
+      }
+      acc[roundId].add(judgeId)
+      return acc
+    }, {})
+    const normalizedAssignments = Object.entries(assignmentsMap).reduce((result, [roundId, judgeSet]) => {
+      result[roundId] = Array.from(judgeSet)
+      return result
+    }, {})
     const computed = computeCompetitionStandings({
       contestants,
       categories,
       rounds,
       scores,
-      judges
+      judges,
+      roundJudgeTargets,
+      roundJudgeAssignments: normalizedAssignments
     })
     setStandings(computed)
     setLoading(false)
-  }, [contestants, categories, rounds, scores, judges])
+  }, [contestants, categories, rounds, scores, judges, roundAssignments])
 
   const fetchData = async () => {
     try {
       setLoading(true)
-      const [contestantsRes, categoriesRes, roundsRes, scoresRes, judgesRes] = await Promise.all([
+      const [contestantsRes, categoriesRes, roundsRes, scoresRes, judgesRes, roundAssignmentsRes] = await Promise.all([
         supabase.from('contestants').select('*').order('number'),
         supabase
           .from('categories')
@@ -52,16 +77,28 @@ export default function RankingPage() {
           .order('order_index'),
         supabase.from('rounds').select('*').order('order_index'),
         supabase.from('contestant_scores').select('*'),
-        supabase.from('judges').select('*').eq('active', true)
+        supabase.from('judges').select('*').eq('active', true),
+        supabase.from('round_judges').select('round_id, judge_id')
       ])
 
       setContestants(contestantsRes.data || [])
       setCategories(categoriesRes.data || [])
-      setRounds(roundsRes.data || [])
+      const normalizedRounds = (roundsRes.data || []).map((round) => ({
+        ...round,
+        judge_target:
+          round.judge_target === null || round.judge_target === undefined
+            ? null
+            : Number(round.judge_target)
+      }))
+      setRounds(normalizedRounds)
       setScores(scoresRes.data || [])
       setJudges(judgesRes.data || [])
+      setRoundAssignments(roundAssignmentsRes.data || [])
 
-      if (selectedRoundId !== 'overall' && !roundsRes.data?.some((round) => round.id === selectedRoundId)) {
+      if (
+        selectedRoundId !== 'overall' &&
+        !normalizedRounds.some((round) => round.id === selectedRoundId)
+      ) {
         setSelectedRoundId('overall')
       }
     } catch (error) {
@@ -74,6 +111,29 @@ export default function RankingPage() {
     if (selectedRoundId === 'overall') return null
     return rounds.find((round) => round.id === selectedRoundId) || null
   }, [rounds, selectedRoundId])
+
+  const judgeCountForSelectedRound = useMemo(() => {
+    if (selectedRoundId === 'overall') {
+      const maxTarget = rounds.reduce((max, round) => {
+        const value = Number(round.judge_target)
+        if (Number.isFinite(value) && value > max) return value
+        return max
+      }, 0)
+      return maxTarget || judges.length
+    }
+
+    const roundData = standings.rounds.find((entry) => entry.round.id === selectedRoundId)
+    if (roundData?.judgeCount) {
+      return roundData.judgeCount
+    }
+
+    const configured = Number(activeRound?.judge_target)
+    if (Number.isFinite(configured) && configured > 0) {
+      return configured
+    }
+
+    return judges.length
+  }, [activeRound, judges.length, rounds, selectedRoundId, standings.rounds])
 
   const roundStandings = useMemo(() => {
     if (selectedRoundId === 'overall') {
@@ -199,7 +259,8 @@ export default function RankingPage() {
               )}
             </div>
             <div className="text-sm text-gray-400">
-              {contestants.length} total contestants • {judges.length} judges submitting scores
+              {contestants.length} total contestants • {judgeCountForSelectedRound}{' '}
+              {judgeCountForSelectedRound === 1 ? 'judge' : 'judges'} contributing scores
             </div>
           </div>
 

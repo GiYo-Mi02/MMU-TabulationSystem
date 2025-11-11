@@ -27,6 +27,7 @@ export default function JudgePageNew() {
   const [currentScoresData, setCurrentScoresData] = useState({})
   const [activeRoundId, setActiveRoundId] = useState(null)
   const [activeRoundName, setActiveRoundName] = useState('Current Round')
+  const [judgesCount, setJudgesCount] = useState(0)
 
   useEffect(() => {
     if (rounds.length === 0) return
@@ -93,6 +94,7 @@ export default function JudgePageNew() {
     fetchCategories()
     fetchSettings()
     checkExistingAssistanceRequest()
+  fetchJudgeCount()
     
     // Subscribe to scores changes with better channel handling
     const scoresSubscription = supabase
@@ -190,6 +192,25 @@ export default function JudgePageNew() {
         console.log('Rounds subscription status:', status)
       })
 
+    // Subscribe to judges changes
+    const judgesSubscription = supabase
+      .channel('judges-realtime', {
+        config: {
+          broadcast: { self: true }
+        }
+      })
+      .on('postgres_changes', {
+        event: '*',
+        schema: 'public',
+        table: 'judges'
+      }, (payload) => {
+        console.log('Judges changed:', payload)
+        fetchJudgeCount()
+      })
+      .subscribe((status) => {
+        console.log('Judges subscription status:', status)
+      })
+
     // Subscribe to contestants changes
     const contestantsSubscription = supabase
       .channel('contestants-realtime', {
@@ -270,6 +291,7 @@ export default function JudgePageNew() {
         supabase.removeChannel(assistanceSubscription)
       }
       supabase.removeChannel(roundsSubscription)
+      supabase.removeChannel(judgesSubscription)
     }
   }, [token, judge?.id])
 
@@ -356,7 +378,11 @@ export default function JudgePageNew() {
 
     const normalizedRounds = (data || []).map(round => ({
       ...round,
-      id: round.id || round.round_id
+      id: round.id || round.round_id,
+      judge_target:
+        round.judge_target === null || round.judge_target === undefined
+          ? null
+          : Number(round.judge_target)
     }))
 
     setRounds(normalizedRounds)
@@ -415,6 +441,17 @@ export default function JudgePageNew() {
   // Get filtered contestants by gender
   const getFilteredContestants = () => {
     return contestants.filter(c => c.sex === genderFilter)
+  }
+
+  const getJudgeTarget = () => {
+    const defaultJudgeCount = Math.max(judgesCount, 1)
+    if (!activeRoundId) return defaultJudgeCount
+    const roundMatch = rounds.find(round => String(round.id) === String(activeRoundId))
+    const configured = Number(roundMatch?.judge_target)
+    if (Number.isFinite(configured) && configured > 0) {
+      return configured
+    }
+    return defaultJudgeCount
   }
 
   // Get paginated contestants
@@ -494,6 +531,20 @@ export default function JudgePageNew() {
 
     // Refresh categories so judges always see the currently active round set by admins.
     fetchCategories(nextRoundId || null)
+  }
+
+  const fetchJudgeCount = async () => {
+    const { data, error } = await supabase
+      .from('judges')
+      .select('id, active')
+
+    if (error) {
+      console.error('Failed to load judges:', error)
+      return
+    }
+
+    const activeJudges = (data || []).filter((record) => record.active).length
+    setJudgesCount(activeJudges)
   }
 
   const checkExistingAssistanceRequest = async () => {
@@ -651,12 +702,9 @@ export default function JudgePageNew() {
       {/* Background overlay */}
       <div className="absolute inset-0 bg-gradient-to-br from-gray-900 via-gray-800 to-black opacity-90"></div>
 
-      {/* Side Menu */}
-      <div
-        className={`fixed top-0 right-0 h-full w-16 bg-gray-800 bg-opacity-90 backdrop-blur-sm z-50 flex flex-col items-center py-6 gap-6 border-l border-gray-700 transition-transform ${
-          sidebarOpen ? 'translate-x-0' : 'translate-x-0'
-        }`}
-      >
+      {/* Side Menu - Full on Desktop/Tablet, Burger on Mobile */}
+      {/* Desktop/Tablet Side Panel */}
+      <div className="hidden lg:flex fixed top-0 right-0 h-full w-16 bg-gray-800 bg-opacity-90 backdrop-blur-sm z-50 flex-col items-center py-6 gap-6 border-l border-gray-700">
         <button
           onClick={() => setSidebarOpen(!sidebarOpen)}
           className="p-3 hover:bg-gray-700 rounded-lg transition-colors"
@@ -684,21 +732,61 @@ export default function JudgePageNew() {
         </button>
       </div>
 
+      {/* Mobile Burger Menu Icon - Only visible on mobile, doesn't take up space */}
+      <button
+        onClick={() => setSidebarOpen(!sidebarOpen)}
+        className="lg:hidden fixed top-6 right-4 z-40 p-2 sm:p-3 hover:bg-gray-700 rounded-lg transition-colors"
+        title="Menu"
+      >
+        <Menu size={20} className="sm:w-6 sm:h-6" />
+      </button>
+
+      {/* Mobile Menu Dropdown */}
+      {sidebarOpen && (
+        <div className="lg:hidden fixed top-16 right-2 z-50 bg-gray-800 bg-opacity-95 backdrop-blur-sm rounded-lg shadow-2xl border border-gray-700 overflow-hidden">
+          <button 
+            onClick={() => {
+              setCriteriaGuideOpen(true)
+              setSidebarOpen(false)
+            }}
+            className="w-full px-4 py-3 flex items-center gap-3 hover:bg-gray-700 transition-colors border-b border-gray-700 text-left"
+            title="Criteria Guide"
+          >
+            <BookOpen size={20} className="text-yellow-400" />
+            <span className="text-sm font-semibold">Criteria Guide</span>
+          </button>
+          <button 
+            onClick={() => {
+              setAssistanceOpen(true)
+              setSidebarOpen(false)
+            }}
+            className="w-full px-4 py-3 flex items-center gap-3 hover:bg-gray-700 transition-colors text-left"
+            title="Get Assistance"
+          >
+            <HelpCircle size={20} className="text-blue-400" />
+            <span className="text-sm font-semibold">Get Assistance</span>
+          </button>
+        </div>
+      )}
+
       {/* Main Content */}
-      <div className="relative z-10 min-h-screen pr-16 flex flex-col">
+      <div className="relative z-10 min-h-screen flex flex-col lg:pr-16">
         {/* Header */}
-        <div className="p-6 flex items-center justify-between bg-gray-800 bg-opacity-50 backdrop-blur-sm border-b border-gray-700">
+        <div className="p-4 sm:p-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 sm:gap-0 bg-gray-800 bg-opacity-50 backdrop-blur-sm border-b border-gray-700">
           <div>
-            <h2 className="text-xs text-gray-400 uppercase tracking-widest mb-3">MR. AND MS. UNIVERSITY OF MAKATI</h2>
-            <h1 className="text-3xl font-bold mb-3">TABULATION SYSTEM</h1>
+            <h2 className="text-xs text-gray-400 uppercase tracking-widest mb-2 sm:mb-3">MR. AND MS. UNIVERSITY OF MAKATI</h2>
+            <h1 className="text-2xl sm:text-3xl font-bold mb-2 sm:mb-3">TABULATION SYSTEM</h1>
+            <p className="text-xs sm:text-sm text-gray-400">
+              Judges contributing this round: <span className="text-yellow-400 font-semibold">{getJudgeTarget()}</span>
+            </p>
           </div>
-          <div className="flex items-center gap-4">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3 sm:gap-4 w-full sm:w-auto">
             <div className="text-right">
               <p className="text-xs text-gray-400 uppercase tracking-widest mb-1">Round</p>
-              <p className="text-xl font-bold text-yellow-400 whitespace-nowrap">{activeRoundName || 'Current Round'}</p>
+              <p className="text-lg sm:text-xl font-bold text-yellow-400 whitespace-nowrap">{activeRoundName || 'Current Round'}</p>
             </div>
             {isLocked && (
-              <div className="bg-red-600 px-6 py-3 rounded-lg font-bold shadow-lg animate-pulse">
+              <div className="bg-red-600 px-4 sm:px-6 py-2 sm:py-3 rounded-lg font-bold shadow-lg animate-pulse text-sm sm:text-base whitespace-nowrap">
                 🔒 SCORING LOCKED
               </div>
             )}
@@ -706,12 +794,12 @@ export default function JudgePageNew() {
         </div>
 
         {/* Split Layout: Left (Scoring) and Right (Photo) */}
-        <div className="flex-1 flex">
+        <div className="flex-1 flex flex-col lg:flex-row">
           {/* Left Side - Scoring Interface */}
-          <div className="w-1/2 flex flex-col items-center justify-center p-12 bg-black bg-opacity-40">
+          <div className="w-full lg:w-1/2 flex flex-col items-center justify-center p-6 sm:p-8 lg:p-12 bg-black bg-opacity-40">
             {/* Circular Progress Ring */}
-            <div className="relative mb-8 cursor-pointer hover:scale-105 transition-transform" onClick={() => !isLocked && categories.length > 0 && setActiveCategory(categories[0].id)}>
-              <svg className="w-80 h-80 -rotate-90" viewBox="0 0 200 200">
+            <div className="relative mb-6 sm:mb-8 cursor-pointer hover:scale-105 transition-transform" onClick={() => !isLocked && categories.length > 0 && setActiveCategory(categories[0].id)}>
+              <svg className="w-48 h-48 sm:w-64 sm:h-64 lg:w-80 lg:h-80 -rotate-90" viewBox="0 0 200 200">
                 <circle
                   cx="100"
                   cy="100"
@@ -735,17 +823,17 @@ export default function JudgePageNew() {
               
               {/* Score Display in Center */}
               <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-center pointer-events-none">
-                <div className="text-xs text-gray-400 uppercase tracking-widest mb-2">(click to score)</div>
-                <div className="text-sm text-gray-300 uppercase tracking-wider mb-1">
+                <div className="text-xs sm:text-sm text-gray-400 uppercase tracking-widest mb-2">(click to score)</div>
+                <div className="text-xs sm:text-sm text-gray-300 uppercase tracking-wider mb-1">
                   {categories.length > 0 ? 'OVERALL SCORE' : 'NO CATEGORIES'}
                 </div>
-                <div className="text-8xl font-bold text-yellow-400 leading-none">{weightedTotal.toFixed(0)}</div>
-                <div className="text-2xl text-gray-400 mt-2">/100</div>
+                <div className="text-5xl sm:text-6xl lg:text-8xl font-bold text-yellow-400 leading-none">{weightedTotal.toFixed(0)}</div>
+                <div className="text-lg sm:text-xl lg:text-2xl text-gray-400 mt-1 sm:mt-2">/100</div>
               </div>
             </div>
 
             {/* Score Slider */}
-            <div className="w-64 mb-12">
+            <div className="w-48 sm:w-56 lg:w-64 mb-8 sm:mb-12">
               <input
                 type="range"
                 min="0"
@@ -758,12 +846,12 @@ export default function JudgePageNew() {
 
             {/* Category Buttons */}
             {!isLocked && selectedContestant && categories.length > 0 && (
-              <div className="flex gap-4 mb-8 flex-wrap justify-center">
+              <div className="flex gap-2 sm:gap-3 lg:gap-4 mb-6 sm:mb-8 flex-wrap justify-center px-2">
                 {categories.map((category, index) => (
                   <button
                     key={category.id}
                     onClick={() => setActiveCategory(category.id)}
-                    className="px-6 py-3 bg-yellow-400 text-gray-900 rounded-full font-bold text-sm hover:bg-yellow-300 transition-all shadow-xl hover:scale-105"
+                    className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 bg-yellow-400 text-gray-900 rounded-full font-bold text-xs sm:text-sm lg:text-sm hover:bg-yellow-300 transition-all shadow-xl hover:scale-105"
                   >
                     {category.name} ({category.percentage}%)
                   </button>
@@ -772,9 +860,9 @@ export default function JudgePageNew() {
             )}
 
             {/* Contestant Name */}
-            <div className="text-center">
-              <h2 className="text-5xl font-bold mb-2">{selectedContestant?.name?.toUpperCase() || 'NO CONTESTANT'}</h2>
-              <p className="text-gray-400 text-lg">
+            <div className="text-center px-2">
+              <h2 className="text-3xl sm:text-4xl lg:text-5xl font-bold mb-1 sm:mb-2">{selectedContestant?.name?.toUpperCase() || 'NO CONTESTANT'}</h2>
+              <p className="text-gray-400 text-sm sm:text-base lg:text-lg">
                 {selectedContestant?.age && selectedContestant?.sex 
                   ? `${selectedContestant.sex}, ${selectedContestant.age} years old`
                   : selectedContestant?.number 
@@ -785,9 +873,9 @@ export default function JudgePageNew() {
           </div>
 
           {/* Right Side - Contestant Photo */}
-          <div className="w-1/2 relative flex items-center justify-center bg-gray-900 overflow-hidden">
+          <div className="w-full lg:w-1/2 relative flex items-center justify-center bg-gray-900 overflow-hidden min-h-[300px] sm:min-h-[400px] lg:min-h-auto">
             {selectedContestant?.photo_url ? (
-              <div className="w-1/2 h-auto max-h-[50vh] flex items-center justify-center">
+              <div className="w-1/2 sm:w-2/3 lg:w-1/2 h-auto max-h-[40vh] sm:max-h-[50vh] lg:max-h-[50vh] flex items-center justify-center">
                 <img
                   src={selectedContestant.photo_url}
                   alt={selectedContestant.name}
@@ -796,19 +884,19 @@ export default function JudgePageNew() {
               </div>
             ) : (
               <div className="w-full h-full bg-gray-800 flex items-center justify-center">
-                <div className="text-9xl font-bold text-gray-600">
+                <div className="text-6xl sm:text-8xl lg:text-9xl font-bold text-gray-600">
                   {selectedContestant?.number || '?'}
                 </div>
               </div>
             )}
             
             {/* Logo Overlay */}
-            <div className="absolute bottom-8 right-8">
-              <div className="bg-white bg-opacity-90 backdrop-blur-sm rounded-full p-4 w-40 h-40 flex items-center justify-center shadow-2xl border-4 border-yellow-400">
+            <div className="absolute bottom-4 sm:bottom-6 lg:bottom-8 right-4 sm:right-6 lg:right-8">
+              <div className="bg-white bg-opacity-90 backdrop-blur-sm rounded-full p-2 sm:p-3 lg:p-4 w-24 h-24 sm:w-32 sm:h-32 lg:w-40 lg:h-40 flex items-center justify-center shadow-2xl border-4 border-yellow-400">
                 <div className="text-center">
                   {selectedContestant?.college ? (
                     <>
-                      <div className="text-sm font-bold text-gray-800 uppercase leading-tight">
+                      <div className="text-xs sm:text-sm lg:text-sm font-bold text-gray-800 uppercase leading-tight">
                         {selectedContestant.college}
                       </div>
                       <div className="text-xs text-gray-600 mt-1">
@@ -827,31 +915,31 @@ export default function JudgePageNew() {
         {/* Contestant Drawer Toggle */}
         <button
           onClick={() => setDrawerOpen(!drawerOpen)}
-          className="w-full py-4 bg-gray-800 bg-opacity-90 flex items-center justify-center gap-2 hover:bg-gray-700 transition-colors border-t border-gray-700"
+          className="w-full py-3 sm:py-4 bg-gray-800 bg-opacity-90 flex items-center justify-center gap-2 hover:bg-gray-700 transition-colors border-t border-gray-700"
         >
-          <ChevronUp size={20} />
-          <span className="text-sm uppercase tracking-wider font-semibold">Contestants</span>
+          <ChevronUp size={18} className="sm:w-5 sm:h-5" />
+          <span className="text-xs sm:text-sm uppercase tracking-wider font-semibold">Contestants</span>
         </button>
 
         {/* Contestants Drawer */}
         <div
-          className={`fixed bottom-0 left-0 right-16 bg-gray-800 bg-opacity-95 backdrop-blur-sm border-t border-gray-700 transition-transform duration-300 ${
+          className={`fixed bottom-0 left-0 right-0 lg:right-16 bg-gray-800 bg-opacity-95 backdrop-blur-sm border-t border-gray-700 transition-transform duration-300 max-h-[50vh] sm:max-h-[60vh] overflow-y-auto z-40 ${
             drawerOpen ? 'translate-y-0' : 'translate-y-full'
           }`}
         >
-          <div className="p-6">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold">Select Contestant</h3>
+          <div className="p-4 sm:p-6">
+            <div className="flex items-center justify-between mb-3 sm:mb-4">
+              <h3 className="text-base sm:text-lg font-semibold">Select Contestant</h3>
               <button onClick={() => setDrawerOpen(false)} className="p-2 hover:bg-gray-700 rounded">
                 <X size={20} />
               </button>
             </div>
 
             {/* Gender Filter Tabs */}
-            <div className="flex gap-2 mb-4 border-b border-gray-700">
+            <div className="flex gap-2 mb-3 sm:mb-4 border-b border-gray-700 text-sm">
               <button
                 onClick={() => handleGenderChange('Male')}
-                className={`px-6 py-2 font-semibold transition-colors border-b-2 ${
+                className={`px-4 sm:px-6 py-2 font-semibold transition-colors border-b-2 ${
                   genderFilter === 'Male'
                     ? 'border-blue-400 text-blue-400'
                     : 'border-transparent text-gray-400 hover:text-gray-200'
@@ -861,7 +949,7 @@ export default function JudgePageNew() {
               </button>
               <button
                 onClick={() => handleGenderChange('Female')}
-                className={`px-6 py-2 font-semibold transition-colors border-b-2 ${
+                className={`px-4 sm:px-6 py-2 font-semibold transition-colors border-b-2 ${
                   genderFilter === 'Female'
                     ? 'border-pink-400 text-pink-400'
                     : 'border-transparent text-gray-400 hover:text-gray-200'
@@ -872,7 +960,7 @@ export default function JudgePageNew() {
             </div>
 
             {/* Contestants Grid */}
-            <div className="flex gap-4 overflow-x-auto pb-2 scrollbar-thin scrollbar-thumb-gray-600 scrollbar-track-gray-800 mb-4">
+            <div className="flex gap-2 sm:gap-4 overflow-x-auto pb-2 scrollbar-thin scrollbar-thumb-gray-600 scrollbar-track-gray-800 mb-3 sm:mb-4">
               {getPaginatedContestants().map((contestant) => (
                 <button
                   key={contestant.id}
@@ -880,11 +968,11 @@ export default function JudgePageNew() {
                     setSelectedContestant(contestant)
                     setDrawerOpen(false)
                   }}
-                  className={`flex-shrink-0 w-24 ${
+                  className={`flex-shrink-0 w-20 sm:w-24 ${
                     selectedContestant?.id === contestant.id ? 'ring-2 ring-yellow-400' : ''
                   }`}
                 >
-                  <div className="w-24 h-24 rounded-lg overflow-hidden border-2 border-gray-700 hover:border-yellow-400 transition-colors relative">
+                  <div className="w-20 h-20 sm:w-24 sm:h-24 rounded-lg overflow-hidden border-2 border-gray-700 hover:border-yellow-400 transition-colors relative">
                     {contestant.photo_url ? (
                       <img
                         src={contestant.photo_url}
@@ -892,22 +980,22 @@ export default function JudgePageNew() {
                         className="w-full h-full object-cover"
                       />
                     ) : (
-                      <div className="w-full h-full bg-gray-700 flex items-center justify-center text-2xl font-bold">
+                      <div className="w-full h-full bg-gray-700 flex items-center justify-center text-xl sm:text-2xl font-bold">
                         {contestant.number}
                       </div>
                     )}
                     {isContestantScored(contestant.id) && (
-                      <div className="absolute top-1 right-1 w-6 h-6 bg-green-500 rounded-full flex items-center justify-center">
+                      <div className="absolute top-1 right-1 w-5 h-5 sm:w-6 sm:h-6 bg-green-500 rounded-full flex items-center justify-center">
                         <span className="text-xs">✓</span>
                       </div>
                     )}
-                    <div className={`absolute bottom-1 left-1 text-xs font-bold px-2 py-0.5 rounded ${
+                    <div className={`absolute bottom-1 left-1 text-xs font-bold px-1.5 py-0.5 rounded ${
                       contestant.sex === 'Male' ? 'bg-blue-500' : 'bg-pink-500'
                     }`}>
                       {contestant.sex?.charAt(0)}{contestant.number}
                     </div>
                   </div>
-                  <p className="text-xs mt-2 text-center truncate">{contestant.name}</p>
+                  <p className="text-xs mt-1 sm:mt-2 text-center truncate">{contestant.name}</p>
                   {getContestantScore(contestant.id) && (
                     <p className="text-xs text-yellow-400 text-center">{getContestantScore(contestant.id).toFixed(1)}</p>
                   )}
@@ -917,20 +1005,20 @@ export default function JudgePageNew() {
 
             {/* Pagination */}
             {getTotalPages() > 1 && (
-              <div className="flex items-center justify-center gap-2">
+              <div className="flex items-center justify-center gap-1 sm:gap-2 text-sm">
                 <button
                   onClick={() => handlePageChange(currentPage - 1)}
                   disabled={currentPage === 1}
-                  className="p-2 hover:bg-gray-700 rounded disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="p-1 sm:p-2 hover:bg-gray-700 rounded disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  <ChevronLeft size={20} />
+                  <ChevronLeft size={18} />
                 </button>
-                <div className="flex gap-1">
+                <div className="flex gap-0.5 sm:gap-1">
                   {Array.from({ length: getTotalPages() }, (_, i) => i + 1).map((page) => (
                     <button
                       key={page}
                       onClick={() => handlePageChange(page)}
-                      className={`px-3 py-1 rounded ${
+                      className={`px-2 sm:px-3 py-1 rounded text-sm ${
                         currentPage === page
                           ? 'bg-yellow-400 text-gray-900 font-bold'
                           : 'bg-gray-700 hover:bg-gray-600'
@@ -943,9 +1031,9 @@ export default function JudgePageNew() {
                 <button
                   onClick={() => handlePageChange(currentPage + 1)}
                   disabled={currentPage === getTotalPages()}
-                  className="p-2 hover:bg-gray-700 rounded disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="p-1 sm:p-2 hover:bg-gray-700 rounded disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  <ChevronRight size={20} />
+                  <ChevronRight size={18} />
                 </button>
               </div>
             )}
@@ -955,8 +1043,8 @@ export default function JudgePageNew() {
 
       {/* Scoring Panel Overlay */}
       {activeCategory && !isLocked && (
-        <div className="fixed inset-0 bg-black bg-opacity-80 z-40 flex items-center justify-center p-8 pr-24">
-          <div className="bg-gray-800 rounded-2xl p-8 max-w-2xl w-full max-h-[80vh] overflow-y-auto">
+        <div className="fixed inset-0 bg-black bg-opacity-80 z-40 flex items-center justify-center p-4 sm:p-8">
+          <div className="bg-gray-800 rounded-2xl p-6 sm:p-8 max-w-2xl w-full max-h-[80vh] overflow-y-auto">
             {(() => {
               const category = categories.find(c => c.id === activeCategory)
               console.log('Active category:', activeCategory)
@@ -983,14 +1071,14 @@ export default function JudgePageNew() {
               return (
                 <>
                   <div className="flex items-center justify-between mb-6">
-                    <h2 className="text-2xl font-bold text-yellow-400">
+                    <h2 className="text-xl sm:text-2xl font-bold text-yellow-400">
                       {category.name} ({category.percentage}%)
                     </h2>
                     <button
                       onClick={() => setActiveCategory(null)}
                       className="p-2 hover:bg-gray-700 rounded-lg"
                     >
-                      <X size={24} />
+                      <X size={20} />
                     </button>
                   </div>
 
@@ -998,11 +1086,11 @@ export default function JudgePageNew() {
                     <p className="text-gray-300 mb-6 text-sm">{category.description}</p>
                   )}
 
-                  <div className="space-y-6">
+                  <div className="space-y-4 sm:space-y-6">
                     {category.criteria && category.criteria.length > 0 ? (
                       category.criteria.map((criterion) => (
                         <div key={criterion.id}>
-                          <div className="flex justify-between mb-2">
+                          <div className="flex justify-between mb-2 text-sm">
                             <span>{criterion.name} (Max: {criterion.max_points})</span>
                             <span className="text-yellow-400 font-bold">
                               {currentScoresData[criterion.id] || 0}
@@ -1026,9 +1114,9 @@ export default function JudgePageNew() {
                     )}
 
                     <div className="pt-4 border-t border-gray-700">
-                      <div className="flex justify-between items-center">
-                        <span className="text-lg">Category Total:</span>
-                        <span className="text-3xl font-bold text-yellow-400">
+                      <div className="flex justify-between items-center text-sm sm:text-base">
+                        <span className="text-base sm:text-lg">Category Total:</span>
+                        <span className="text-2xl sm:text-3xl font-bold text-yellow-400">
                           {categoryTotal.toFixed(1)}/{categoryMax}
                         </span>
                       </div>
@@ -1038,7 +1126,7 @@ export default function JudgePageNew() {
                   <button
                     onClick={handleSubmitScore}
                     disabled={!category.criteria || category.criteria.length === 0}
-                    className="w-full mt-6 bg-yellow-400 text-gray-900 py-4 rounded-lg font-bold text-lg hover:bg-yellow-300 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="w-full mt-6 bg-yellow-400 text-gray-900 py-3 sm:py-4 rounded-lg font-bold text-base sm:text-lg hover:bg-yellow-300 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     Save Score
                   </button>
@@ -1051,18 +1139,18 @@ export default function JudgePageNew() {
 
       {/* Criteria Guide Modal */}
       {criteriaGuideOpen && (
-        <div className="fixed inset-0 bg-black bg-opacity-80 z-50 flex items-center justify-center p-8 pr-24">
-          <div className="bg-gray-800 rounded-2xl p-8 max-w-4xl w-full max-h-[85vh] overflow-y-auto">
+        <div className="fixed inset-0 bg-black bg-opacity-80 z-50 flex items-center justify-center p-4 sm:p-8">
+          <div className="bg-gray-800 rounded-2xl p-6 sm:p-8 max-w-4xl w-full max-h-[85vh] overflow-y-auto">
             <div className="flex items-center justify-between mb-6">
-              <div className="flex items-center gap-3">
-                <BookOpen size={32} className="text-yellow-400" />
-                <h2 className="text-3xl font-bold text-yellow-400">Scoring Criteria Guide</h2>
+              <div className="flex items-center gap-2 sm:gap-3">
+                <BookOpen size={28} className="sm:w-8 sm:h-8 text-yellow-400" />
+                <h2 className="text-2xl sm:text-3xl font-bold text-yellow-400">Scoring Criteria Guide</h2>
               </div>
               <button
                 onClick={() => setCriteriaGuideOpen(false)}
                 className="p-2 hover:bg-gray-700 rounded-lg"
               >
-                <X size={24} />
+                <X size={20} />
               </button>
             </div>
 
@@ -1078,21 +1166,31 @@ export default function JudgePageNew() {
                   const color = colors[catIndex % colors.length]
                   
                   return (
-                    <div key={category.id} className="bg-gray-900 rounded-lg p-6">
-                      <h3 className={`text-2xl font-bold text-${color}-400 mb-4`}>
+                    <div key={category.id} className="bg-gray-900 rounded-lg p-6 border border-gray-800">
+                      <h3 className={`text-xl sm:text-2xl font-bold text-${color}-400 mb-3`}>
                         {category.name} - Weight: {category.percentage}%
                       </h3>
+                      
                       {category.description && (
-                        <p className="text-gray-300 mb-4 italic">{category.description}</p>
+                        <div className="bg-gray-800 bg-opacity-60 rounded-lg p-5 border-l-4 border-yellow-400 mb-5">
+                          <p className="text-gray-200 text-sm sm:text-base leading-relaxed whitespace-pre-wrap">
+                            {category.description}
+                          </p>
+                        </div>
                       )}
                       
                       {category.criteria && category.criteria.length > 0 ? (
-                        <div className="space-y-4 text-gray-200">
-                          {category.criteria.map((criterion) => (
-                            <div key={criterion.id} className={`border-l-4 border-${color}-400 pl-4`}>
-                              <h4 className="font-bold text-lg mb-2">
-                                {criterion.name} (Max: {criterion.max_points} points)
-                              </h4>
+                        <div className="space-y-3 text-gray-200">
+                          {category.criteria.map((criterion, idx) => (
+                            <div key={criterion.id} className={`border-l-4 border-${color}-500 pl-4 py-2`}>
+                              <div className="flex items-center justify-between">
+                                <h4 className="font-bold text-sm sm:text-base">
+                                  {idx + 1}. {criterion.name}
+                                </h4>
+                                <span className={`text-${color}-400 font-bold text-sm`}>
+                                  Max: {criterion.max_points}pts
+                                </span>
+                              </div>
                             </div>
                           ))}
                         </div>
@@ -1104,9 +1202,11 @@ export default function JudgePageNew() {
                 })}
 
                 {/* Scoring Tips */}
-                <div className="bg-gradient-to-br from-yellow-900 to-yellow-800 rounded-lg p-6">
-                  <h3 className="text-xl font-bold text-white mb-3">📋 Scoring Tips</h3>
-                  <ul className="space-y-2 text-gray-100">
+                <div className="bg-gradient-to-br from-yellow-900 to-yellow-800 rounded-lg p-6 border border-yellow-700">
+                  <h3 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
+                    <span>📋</span> Scoring Tips
+                  </h3>
+                  <ul className="space-y-2 text-gray-100 text-sm sm:text-base">
                     <li className="flex items-start gap-2">
                       <span className="text-yellow-300 font-bold">•</span>
                       <span>Be fair and consistent across all contestants</span>
@@ -1138,15 +1238,15 @@ export default function JudgePageNew() {
       {/* Get Assistance Modal - Cinematic Design */}
       {assistanceOpen && (
         <div 
-          className="fixed inset-0 bg-black bg-opacity-90 z-50 flex items-center justify-center p-4 backdrop-blur-sm"
+          className="fixed inset-0 bg-black bg-opacity-90 z-50 flex items-center justify-center p-3 sm:p-4 backdrop-blur-sm"
           onClick={() => setAssistanceOpen(false)}
         >
           <div 
-            className="bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900 rounded-3xl overflow-hidden max-w-4xl w-full max-h-[90vh] shadow-2xl border border-gray-700 relative"
+            className="bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900 rounded-2xl sm:rounded-3xl overflow-hidden max-w-4xl w-full max-h-[90vh] shadow-2xl border border-gray-700 relative"
             onClick={(e) => e.stopPropagation()}
           >
             {/* Cinematic Header with Gradient Background */}
-            <div className="relative h-56 bg-gradient-to-br from-blue-600 via-purple-600 to-pink-600 overflow-hidden">
+            <div className="relative h-40 sm:h-56 bg-gradient-to-br from-blue-600 via-purple-600 to-pink-600 overflow-hidden">
               {/* Animated Background Pattern */}
               <div className="absolute inset-0 bg-black bg-opacity-40"></div>
               <div className="absolute inset-0 opacity-30" style={{
@@ -1169,17 +1269,17 @@ export default function JudgePageNew() {
               </button>
 
               {/* Title Content */}
-              <div className="relative z-10 h-full flex flex-col items-center justify-center text-center px-6">
-                <div className="bg-white bg-opacity-20 p-5 rounded-2xl backdrop-blur-md mb-4 transform hover:scale-110 transition-transform duration-300">
-                  <HelpCircle size={56} className="text-white" />
+              <div className="relative z-10 h-full flex flex-col items-center justify-center text-center px-4 sm:px-6">
+                <div className="bg-white bg-opacity-20 p-3 sm:p-5 rounded-2xl backdrop-blur-md mb-3 sm:mb-4 transform hover:scale-110 transition-transform duration-300">
+                  <HelpCircle size={40} className="sm:w-14 sm:h-14 text-white" />
                 </div>
-                <h2 className="text-5xl font-bold text-white mb-3 tracking-tight drop-shadow-lg">
+                <h2 className="text-3xl sm:text-5xl font-bold text-white mb-2 sm:mb-3 tracking-tight drop-shadow-lg">
                   WE ARE COMING.
                 </h2>
-                <p className="text-blue-100 text-xl font-medium tracking-wide">
+                <p className="text-blue-100 text-base sm:text-xl font-medium tracking-wide">
                   TECHNICAL ASSISTANCE & SUPPORT
                 </p>
-                <div className="mt-4 flex items-center gap-2 text-white text-sm">
+                <div className="mt-3 sm:mt-4 flex items-center gap-2 text-white text-xs sm:text-sm">
                   <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
                   <span>Available 24/7 during event</span>
                 </div>
@@ -1187,7 +1287,7 @@ export default function JudgePageNew() {
             </div>
 
             {/* Content Area */}
-            <div className="p-8 space-y-6 overflow-y-auto max-h-[calc(90vh-14rem)] bg-gray-900">
+            <div className="p-6 sm:p-8 space-y-4 sm:space-y-6 overflow-y-auto max-h-[calc(90vh-14rem)] bg-gray-900 text-sm sm:text-base">
               {/* Judge Info */}
               <div className="bg-gray-900 rounded-lg p-6">
                 <h3 className="text-xl font-bold text-white mb-3">👤 Your Judge Profile</h3>

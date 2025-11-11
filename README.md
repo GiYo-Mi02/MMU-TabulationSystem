@@ -1,273 +1,366 @@
-# Pageant Tabulation System
+# MMU Tabulation System
 
-A professional, real-time tabulation system for pageant scoring built with React, TailwindCSS, and Supabase.
+Real-time, multi-round tabulation for pageants and competitions. Built with React + Vite, TailwindCSS, and Supabase (PostgreSQL + Realtime).
 
-## 🚀 Features
+## Features
 
-### 🔴 **Real-Time Updates - No Refresh Needed!**
+- Multi-round competitions with per-round categories and weights
+- Real-time updates for judges, admins, and public leaderboards (no refresh)
+- Judge panel with unique tokenized URL, mobile-first design, and progress tracking
+- Admin Competition Editor to define rounds, categories, and criteria
+- Per-round judge allocations, advancement caps, and highlight quotas
+- Lock/unlock scoring globally from Admin and reflect instantly on all judges
+- Public leaderboard with podium view, gender filters, and CSV export (admin)
+- Assistance request workflow from judge devices to admins
+- Live connection indicator and resilient realtime subscriptions
 
-Everything updates automatically across all devices:
+## How it works (at a glance)
 
-- **Live scoring**: See scores appear instantly as judges submit them
-- **Real-time rankings**: Leaderboard updates automatically
-- **Lock/unlock sync**: Judges' interfaces update instantly
-- **Connection indicator**: Green "Live" badge shows real-time status
-- **Multi-user**: All admins and judges see changes simultaneously
+1. Admin configures rounds, categories, and criteria in the Competition Editor.
+2. Judges open their unique URL and submit scores per criterion for each contestant; scores write to `contestant_scores`.
+3. Leaderboards compute totals live in the browser using `src/lib/scoring.js`, listening to Supabase realtime for instant updates.
+4. The currently active round is synced in the `settings` table via keys:
+   - `active_round_id` (string id)
+   - `round_name` (display label)
+   - `is_locked` (`"true"`/`"false"`)
 
-👉 **[Learn more about real-time features](./REALTIME_FEATURES.md)**
+When admins switch rounds, the judge page and leaderboards re-filter automatically. If a round includes a `judge_target`, the judge page and leaderboards treat that number as the expected submission count per criterion for completion metrics.
 
-### 🧑‍⚖️ Judge Side (No Login Required)
+## Scoring formula (documented)
 
-- **Unique URL per judge** - Each judge gets their own personalized scoring link
-- **Beautiful contestant cards** - Clean, professional UI with photos and details
-- **Weighted scoring system** - 3 categories with multiple criteria (see scoring details below)
-- **Real-time score calculation** - Instant weighted total calculation as you score
-- **Progress tracking** - See how many contestants you've scored
-- **Auto-save scores** - Scores sync automatically to Supabase
-- **Mobile-friendly** - Works perfectly on tablets and phones
-- **Live updates** - New contestants appear automatically, lock status updates instantly
+All scoring lives in `src/lib/scoring.js`. The system supports any number of categories per round and any number of criteria per category.
 
-👉 **[Learn about the scoring system](./SCORING_SYSTEM.md)**
+Terminology
 
-### 🧑‍💼 Admin Side
+- Category: Has a percentage weight (e.g., 40%).
+- Criterion: Has a `max_points` (e.g., 20). Judges enter scores up to `max_points`.
 
-- **Judge Management** - Add/remove judges, generate unique URLs, activate/deactivate
-- **Contestant Management** - Add/edit/delete contestants with photos
-- **Live Scoreboard** - Real-time rankings with average scores per category
-- **Lock/Unlock Scoring** - Freeze submissions when rounds end
-- **Public Display Mode** - Beautiful full-screen leaderboard for projection
-- **Real-time Updates** - Everything updates live as judges submit scores
-- **Live indicator** - Visual confirmation of real-time connection status
+Per-contestant, per-category
 
-### 🏆 Public Leaderboard
+1. Average criterion score across all judges for each criterion.
+2. Sum those averages to get the category total.
+3. Normalize category total to 100 using the criterion max sum:
+   - `normalized = (sum_of_criterion_averages / sum_of_criterion_max_points) × 100`
+4. Apply category weight:
+   - `weighted = normalized × (category.percentage / 100)`
 
-- **Beautiful podium display** - Stunning top 3 visualization
-- **Full rankings** - Complete list with photos and scores
-- **Live updates** - Automatically refreshes as new scores come in
-- **Projection-ready** - Perfect for displaying during events
-- **Connection status** - Shows "Live" indicator in top-right corner
+Per-round total
 
-## 🛠️ Tech Stack
+- `totalWeightedScore = sum(category weighted values)` for that round.
+- Contestants rank by `totalWeightedScore` (desc).
 
-- **Frontend**: React 18 + Vite
-- **Styling**: TailwindCSS with custom design system
-- **Backend**: Supabase (PostgreSQL)
-- **Real-time**: Supabase Realtime
-- **Routing**: React Router v6
-- **Icons**: Lucide React
-- **Notifications**: Sonner (toast notifications)
+Overall total
 
-## 📦 Installation
+- Same computation across all categories of all rounds (useful for global rankings).
 
-### 1. Clone and Install Dependencies
+Gender handling and highlights
 
-\`\`\`bash
-cd TabulationSystem
+- Gender values are normalized (male/female/other) for ranking splits.
+- Each round can set per-gender limits:
+  - participation: `max_per_gender` (or `participants_per_gender`)
+  - advancement: `advance_per_gender`
+  - highlight: `highlight_per_gender`
+- Leaderboards annotate gender rank and highlight the top N per gender when configured.
+
+Implementation quick-links
+
+- `computeCompetitionStandings` — orchestrates overall and per-round rankings
+- `calculateContestantRoundScore` — computes weighted totals and completion stats
+
+## Core screens
+
+- Admin Dashboard (`/admin`) — Stats and quick links
+- Competition Editor (`/admin/competition`) — Rounds, categories, criteria, and active round
+- Contestants (`/admin/contestants`) — Manage roster and photos
+- Judges (`/admin/judges`) — Create unique judge URLs and activate/deactivate
+- Admin Leaderboard (`/admin/leaderboard`) — Live, filterable standings + CSV export
+- Public Leaderboard (`/leaderboard`) — Podium and full rankings for display
+- Judge Panel (`/judge/:token`) — Personalized scoring interface (JudgePageNew)
+
+## Data model (Supabase tables)
+
+The app expects the following tables (field names inferred from code):
+
+- `contestants`: id, number, name, sex, photo_url, created_at
+- `judges`: id, name, url_token, active, created_at
+- `rounds`: id, name, order_index, max_per_gender, advance_per_gender, highlight_per_gender
+  - Optional metadata: `judge_target` (expected judge submissions per criterion)
+- `categories`: id, name, description, percentage, round_id, order_index, is_open, is_convention
+- `criteria`: id, category_id, name, max_points, order_index
+- `contestant_scores`: id, contestant_id, judge_id, criterion_id, score, created_at
+- `settings`: key (unique), value (text)
+- `assistance_requests`: id, judge_id, status, resolved_by, created_at
+- `photos` (optional helper used by ContestantsList): id, url, contestant_id
+
+Notes
+
+- Ensure a unique constraint on `settings.key` (the code uses upsert with `onConflict: 'key'`).
+- RLS rules should allow the app to read and write as needed (typical for event networks). Adjust for your security posture.
+
+## Environment and setup
+
+Prerequisites
+
+- Node.js 18+
+- A Supabase project (URL + anon key)
+
+1. Install dependencies
+
+   ```bash
+   npm install
+   ```
+
+2. Configure environment
+
+   Create a `.env` file in the project root:
+
+   ```env
+   VITE_SUPABASE_URL=your_supabase_project_url
+   VITE_SUPABASE_ANON_KEY=your_supabase_anon_key
+   ```
+
+3. Start the dev server
+
+   ```bash
+   npm run dev
+   ```
+
+The app runs via Vite. Default preview typically appears at `http://localhost:5173` (or the port shown in your terminal).
+
+## Using the system (end-to-end)
+
+1. Define rounds in the Competition Editor. If none exist, the app seeds four defaults (Preliminary Showcase, Semifinal Performance, Final Evening Gown, Crowning Q&A) with per-round judge targets and advancement caps.
+2. Create categories under each round and add criteria with `max_points`. Set category percentages per round (round weight = sum of its categories’ percentages).
+3. Add contestants (number, name, gender/sex, optional photo URL).
+4. Add judges. Send each judge their unique link (tokenized URL).
+5. Set the active round from the Competition Editor. The app writes `active_round_id` and `round_name` into `settings`, so all clients update live.
+6. Judges score each criterion. Submissions write to `contestant_scores`; re-submitting overwrites prior scores for that judge/contestant.
+7. Watch the Admin/Public leaderboard update in real time. Use gender filters or export CSV from the admin view.
+8. Lock scoring from Admin when a round ends (`is_locked = "true"`). Judge UIs prevent submissions until unlocked.
+
+## Real-time behavior
+
+- The app subscribes to changes on: `contestant_scores`, `categories`, `criteria`, `settings`, `rounds`, `contestants`.
+- Active round changes propagate instantly to judge devices and leaderboards.
+- A Live indicator shows realtime connectivity on display views.
+
+## CSV export (admin)
+
+From `/admin/leaderboard`, export the displayed rankings (overall or specific round, filtered by gender). File names include round/gender and date.
+
+## Troubleshooting
+
+Missing Supabase environment variables
+
+- Ensure `.env` contains `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`.
+
+Realtime not updating
+
+- Confirm Supabase Realtime is enabled for your project and tables.
+- Check the browser console for subscription errors.
+
+409 conflicts on settings writes
+
+- Add a unique constraint on `settings.key` (e.g., primary key or unique index). The app uses upsert with `onConflict: 'key'`).
+
+Judges stuck on the wrong round
+
+- Ensure `active_round_id` in `settings` is a string matching the round `id`.
+- Use the Competition Editor to set the active round; clients will sync automatically.
+
+## Tech stack
+
+- React 18 + Vite
+- TailwindCSS
+- Supabase (PostgreSQL + Realtime)
+- React Router v6
+- Lucide React icons
+- Sonner for toasts
+
+## Scripts
+
+- `npm run dev` — Start Vite dev server
+- `npm run build` — Production build
+- `npm run preview` — Preview production build
+- `npm run lint` — ESLint
+
+## License
+
+MIT — use and adapt for your events.
+
+## Credits
+
+Built for smooth, reliable pageant tabulation — with real-time, multi-round scoring.
+
+# MMU Tabulation System
+
+Real‑time, multi‑round tabulation for pageants and competitions. Built with React + Vite, TailwindCSS, and Supabase (PostgreSQL + Realtime).
+
+## Features
+
+- Multi‑round competitions with per‑round categories and weights
+- Real‑time updates for judges, admins, and public leaderboards (no refresh)
+- Judge panel with unique tokenized URL, mobile‑first design, and progress tracking
+- Admin Competition Editor to define rounds, categories, and criteria
+- Per‑round judge allocations, advancement caps, and highlight quotas
+- Lock/unlock scoring globally from Admin and reflect instantly on all judges
+- Public leaderboard with podium view, gender filters, and CSV export (admin)
+- Assistance request workflow from judge devices to admins
+- Live connection indicator and resilient realtime subscriptions
+
+## How it works (at a glance)
+
+1. Admin configures Rounds, Categories, and Criteria in the Competition Editor.
+
+2. Judges open their unique URL and submit scores per criterion for each contestant. Scores write to `contestant_scores`.
+
+3. Leaderboards compute totals live in the browser using `src/lib/scoring.js`, listening to Supabase realtime for instant updates.
+
+4. The currently active round is synced in the `settings` table using keys:
+   - `active_round_id` (string id)
+   - `round_name` (display label)
+   - `is_locked` (`"true"`/`"false"`)
+
+When admins switch rounds, the judge page and leaderboards re-filter automatically by that round.
+When `rounds.judge_target` is set, leaderboards and judge panels treat that value as the expected submission count per criterion for the round.
+
+## Scoring formula (documented)
+
+All scoring is defined in `src/lib/scoring.js`. The system supports any number of categories per round and any number of criteria per category.
+
+Terminology
+
+- Category: Has a percentage weight (e.g., 40%).
+- Criterion: Has a max_points (e.g., 20). Judges enter scores up to max_points.
+
+Per-Contestant, Per-Category
+
+1. Average criterion score across all judges for each criterion.
+2. Sum those averages to get the category total.
+3. Normalize category total to 100 using the criterion max sum:
+   - normalized = (sum_of_criterion_averages / sum_of_criterion_max_points) × 100
+4. Apply category weight:
+   - weighted = normalized × (category.percentage / 100)
+
+Per Round total
+
+- totalWeightedScore = sum of all category weighted values in that round.
+- Contestants are ranked by totalWeightedScore (desc).
+
+Overall total
+
+- Same computation across all categories of all rounds (useful when you want a global ranking).
+
+Gender handling and highlights
+
+- Gender values are normalized (male/female/other) for ranking splits.
+- Each round can set per‑gender limits:
+  - participation: `max_per_gender` (or `participants_per_gender`)
+  - advancement: `advance_per_gender`
+  - highlight: `highlight_per_gender`
+- Leaderboards annotate gender rank and highlight the top N per gender when configured.
+
+The implementation details live in:
+
+- Per‑round judge allocations, advancement caps, and highlight quotas
+- Judges (`/admin/judges`) — Create unique judge URLs and activate/deactivate
+- Admin Leaderboard (`/admin/leaderboard`) — Live, filterable standings + CSV export
+- Public Leaderboard (`/leaderboard`) — Podium and full rankings for display
+- Judge Panel (`/judge/:token`) — Personalized scoring interface (JudgePageNew)
+
+## Data model (Supabase tables)
+
+The app expects the following tables (field names inferred from code):
+
+- `contestants`: id, number, name, sex, photo_url, created_at
+- `rounds`: id, name, order_index, max_per_gender, advance_per_gender, highlight_per_gender
+  - Optional metadata: `judge_target` (expected judge submissions per criterion)
+- `categories`: id, name, description, percentage (number), round_id, order_index, is_open (bool?), is_convention (bool?)
+- `criteria`: id, category_id, name, max_points (number), order_index
+- `contestant_scores`: id, contestant_id, judge_id, criterion_id, score (number), created_at
+- `settings`: key (unique), value (text)
+- `assistance_requests`: id, judge_id, status (pending|resolved|cancelled), resolved_by, created_at
+- `photos` (optional helper used by ContestantsList): id, url, contestant_id
+
+Notes
+
+- Ensure a unique constraint on `settings.key` (the code uses upsert with `onConflict: 'key'`).
+- RLS rules should allow the app to read and write as needed (typical for event networks). Adjust for your security posture.
+
+## Environment and setup
+
+- Node.js 18+
+- A Supabase project (URL + anon key)
+
+1. Install dependencies
+
+```bash
 npm install
-\`\`\`
+```
 
-### 2. Set Up Supabase
+Create a `.env` file in the project root:
 
-1. Go to [supabase.com](https://supabase.com) and create a new project
-2. Copy your project URL and anon key
-3. Create a `.env` file in the root directory:
-
-\`\`\`env
-VITE_SUPABASE_URL=your_supabase_project_url
 VITE_SUPABASE_ANON_KEY=your_supabase_anon_key
-\`\`\`
 
-### 3. Run Database Migration
+````
 
-1. Go to your Supabase project dashboard
-2. Navigate to **SQL Editor**
-3. Copy the contents of `supabase-schema.sql`
-4. Paste and run the SQL script
 
-This will create:
-
-- `judges` table
-- `contestants` table
-- `scores` table
-- `settings` table
-- Necessary indexes and triggers
-
-### 4. Start Development Server
-
-\`\`\`bash
+```bash
 npm run dev
-\`\`\`
+The app runs via Vite. Default preview is typically `http://localhost:5173` (or the port shown in your terminal).
 
-The app will be available at `http://localhost:3000`
+## Using the system (end‑to‑end)
+6. Judges score each criterion. Submissions write to `contestant_scores`. Re‑submitting overwrites prior scores for that judge/contestant.
+7. Watch the Admin/Public leaderboard update in real time. Use gender filters or export CSV from the admin view.
+8. Lock scoring from Admin when a round ends (`is_locked = "true"`). Judge UIs will prevent submissions until unlocked.
+- Active round changes propagate instantly to judge devices and leaderboards.
+- A Live indicator shows realtime connectivity on display views.
 
-## 🌐 LAN/Network Access
+## CSV export (admin)
 
-To access the system from other devices on your network:
+From `/admin/leaderboard`, export the displayed rankings (overall or specific round, filtered by gender). File name includes round/gender and date.
 
-1. Find your computer's local IP address:
+## Troubleshooting
 
-   - Windows: `ipconfig` (look for IPv4 Address)
-   - Mac/Linux: `ifconfig` or `ip addr`
+Missing Supabase environment variables
 
-2. Access the app from other devices using:
-   \`http://YOUR_IP_ADDRESS:3000\`
+- Ensure `.env` contains `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`.
 
-## 📋 Usage Guide
+Realtime not updating
 
-### Setting Up for an Event
+- Confirm Supabase Realtime is enabled for your project and tables.
+- Check browser console for subscription errors.
 
-1. **Add Judges**
+409 conflicts on settings writes
 
-   - Go to Admin Dashboard → Manage Judges
-   - Click "Add Judge" and enter their name
-   - Copy their unique URL and send it to them
+- Add a unique constraint on `settings.key` (e.g., primary key or unique index). The app uses upsert with `onConflict: 'key'`.
 
-2. **Add Contestants**
+Judges stuck on the wrong round
 
-   - Go to Admin Dashboard → Manage Contestants
-   - Add each contestant with number, name, and optional photo URL
-   - Photos can be hosted on any image hosting service
+- Ensure `active_round_id` in `settings` is a string matching the round `id`.
+- Use the Competition Editor to set the active round; clients will sync automatically.
 
-3. **Share Judge Links**
+## Tech stack
 
-   - Each judge opens their unique URL on their device
-   - They can start scoring immediately (no login needed)
+- React 18 + Vite
+- TailwindCSS
+- Supabase (PostgreSQL + Realtime)
+- React Router v6
+- Lucide React icons
+- Sonner for toasts
 
-4. **Monitor Live Scoreboard**
+## Scripts
 
-   - Go to Admin Dashboard → Live Scoreboard
-   - Watch real-time updates as judges submit scores
-   - See completion rates and rankings
+- `npm run dev` — Start Vite dev server
+- `npm run build` — Production build
+- `npm run preview` — Preview production build
+- `npm run lint` — ESLint
 
-5. **Display Public Leaderboard**
+## License
 
-   - Open `/leaderboard` route in a browser
-   - Project this on a screen for the audience
-   - Rankings update automatically in real-time
+MIT — use and adapt for your events.
 
-6. **Lock Scoring**
-   - When the round ends, click "Lock Scoring" in Admin Scoreboard
-   - Judges can no longer submit or update scores
-   - Unlock anytime to allow changes
+## Credits
 
-## � Scoring System
-
-### Weighted 3-Category System
-
-The system uses a professional weighted scoring approach:
-
-**Category 1 (Weight: 60%)**
-
-- Score 1: 0-60 points
-- Score 2: 0-20 points
-- Score 3: 0-20 points
-- Subtotal: 100 points
-
-**Category 2 (Weight: 20%)**
-
-- Score 1: 0-50 points
-- Score 2: 0-50 points
-- Subtotal: 100 points
-
-**Category 3 (Weight: 20%)**
-
-- Score 1: 0-40 points
-- Score 2: 0-30 points
-- Score 3: 0-20 points
-- Subtotal: 100 points
-
-**Final Score Formula:**
-
-```
-Weighted Total = (Category 1 × 0.6) + (Category 2 × 0.2) + (Category 3 × 0.2)
-Maximum: 100 points
-```
-
-📖 **[Full Scoring System Documentation](./SCORING_SYSTEM.md)**
-
-## 🎨 Customization
-
-### Scoring Categories
-
-To customize the scoring system:
-
-- **Database Schema**: Edit `supabase-schema.sql` (column names, max values, weights)
-- **Judge Interface**: Edit `src/pages/JudgePage.jsx` (slider ranges, labels)
-- **Results Display**: Edit `src/components/admin/ResultsBoard.jsx` (table columns)
-- **Calculations**: Edit `src/lib/utils.js` (weighted formula)
-
-📋 **[Migration Guide](./SCORING_MIGRATION.md)** - If upgrading from old system
-
-### Colors and Styling
-
-The project uses Tailwind with a custom color palette. Edit `tailwind.config.js` and `src/index.css` to customize.
-
-## 🚀 Deployment
-
-### Deploy to Vercel/Netlify
-
-1. Push your code to GitHub
-2. Connect your repository to Vercel or Netlify
-3. Add environment variables (Supabase URL and key)
-4. Deploy!
-
-### Local Network Deployment
-
-For pageant day, you can run the system on a local computer and access it via LAN:
-
-1. Ensure all devices are on the same network
-2. Run `npm run dev` on the host computer
-3. Share the local IP address with judges
-4. Project the leaderboard on a screen
-
-## 📱 Mobile Optimization
-
-The system is fully responsive and optimized for:
-
-- Tablets (iPad, Android tablets)
-- Phones (iPhone, Android)
-- Desktop computers
-
-Judges can comfortably score on any device!
-
-## 🔒 Security Notes
-
-- This system uses Supabase Row Level Security (RLS) with permissive policies
-- It's designed for trusted, closed environments (pageant events)
-- For production use, consider implementing proper authentication
-- Judge URLs should be kept private (they act as access tokens)
-
-## 🐛 Troubleshooting
-
-### "Missing Supabase environment variables"
-
-- Make sure `.env` file exists with correct credentials
-- Restart the dev server after creating `.env`
-
-### Scores not updating in real-time
-
-- Check your Supabase project is active
-- Verify real-time is enabled in Supabase settings
-- Check browser console for errors
-
-### Can't access from other devices
-
-- Make sure all devices are on the same network
-- Check firewall settings on the host computer
-- Try accessing with the correct local IP address
-
-## 📄 License
-
-MIT License - Feel free to use this for your events!
-
-## 🤝 Contributing
-
-Pull requests are welcome! For major changes, please open an issue first.
-
-## ✨ Credits
-
-Built with ❤️ for seamless pageant tabulation
-
----
-
-**Happy Scoring! 🏆✨**
+Built for smooth, reliable pageant tabulation — with real‑time, multi‑round scoring.
+````
