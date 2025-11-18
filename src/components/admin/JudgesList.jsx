@@ -7,7 +7,7 @@ import { Input } from '@/components/ui/Input'
 import { Label } from '@/components/ui/Label'
 import Modal from '@/components/ui/Modal'
 import { toast } from 'sonner'
-import { UserPlus, Copy, Trash2, Power, Link as LinkIcon, ClipboardList, CheckSquare } from 'lucide-react'
+import { UserPlus, Copy, Trash2, Power, Link as LinkIcon, ClipboardList, CheckSquare, BookOpen, Target } from 'lucide-react'
 
 function JudgeModal({ isOpen, onClose, onSuccess }) {
   const [judgeName, setJudgeName] = useState('')
@@ -168,12 +168,168 @@ function JudgeRoundsModal({ isOpen, judge, rounds, selectedRoundIds, onSave, onC
   )
 }
 
+function JudgeCategoriesModal({ isOpen, judge, categories, rounds, roundAssignments, onSave, onClose }) {
+  const [selection, setSelection] = useState({})
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    if (isOpen && judge) {
+      fetchCategoryAssignments()
+    }
+  }, [isOpen, judge])
+
+  const fetchCategoryAssignments = async () => {
+    if (!judge) return
+    
+    const { data, error } = await supabase
+      .from('category_judges')
+      .select('category_id')
+      .eq('judge_id', judge.id)
+    
+    if (error) {
+      console.error('Failed to fetch category assignments:', error)
+      return
+    }
+    
+    const assigned = new Set((data || []).map(d => String(d.category_id)))
+    setSelection(
+      categories.reduce((acc, cat) => {
+        acc[String(cat.id)] = assigned.has(String(cat.id))
+        return acc
+      }, {})
+    )
+  }
+
+  const toggleCategory = (categoryId) => {
+    setSelection((prev) => ({
+      ...prev,
+      [categoryId]: !prev[categoryId]
+    }))
+  }
+
+  const handleSave = async () => {
+    if (!judge) return
+    setSaving(true)
+    
+    try {
+      const toAssign = Object.keys(selection).filter(catId => selection[catId])
+      
+      // Delete all current assignments
+      await supabase
+        .from('category_judges')
+        .delete()
+        .eq('judge_id', judge.id)
+      
+      // Insert new assignments
+      if (toAssign.length > 0) {
+        const payload = toAssign.map(catId => ({
+          judge_id: judge.id,
+          category_id: catId
+        }))
+        
+        const { error } = await supabase
+          .from('category_judges')
+          .insert(payload)
+        
+        if (error) throw error
+      }
+      
+      toast.success('Category assignments updated')
+      await onSave()
+      onClose()
+    } catch (error) {
+      console.error('Failed to save category assignments:', error)
+      toast.error('Failed to update category assignments')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  // Group categories by round
+  const judgeRoundIds = new Set(roundAssignments[judge ? String(judge.id) : ''] || [])
+  const categoriesByRound = categories.reduce((acc, cat) => {
+    if (judgeRoundIds.has(String(cat.round_id))) {
+      const roundId = String(cat.round_id)
+      if (!acc[roundId]) {
+        acc[roundId] = []
+      }
+      acc[roundId].push(cat)
+    }
+    return acc
+  }, {})
+
+  return (
+    <Modal
+      isOpen={isOpen}
+      onClose={onClose}
+      title={judge ? `Assign Scoring Categories to ${judge.name}` : 'Assign Categories'}
+      size="md"
+    >
+      <div className="space-y-4">
+        <p className="text-sm text-gray-600">
+          Select which specific categories this judge will score within their assigned rounds.
+        </p>
+
+        {Object.keys(categoriesByRound).length === 0 ? (
+          <p className="text-sm text-gray-500">No rounds assigned to this judge. Assign rounds first.</p>
+        ) : (
+          <div className="space-y-4 max-h-96 overflow-y-auto">
+            {rounds
+              .filter(round => categoriesByRound[String(round.id)])
+              .map((round) => (
+                <div key={round.id} className="border-l-4 border-blue-500 pl-4">
+                  <h4 className="font-semibold text-sm text-gray-800 mb-2">
+                    {round.name || `Round ${round.order_index}`}
+                  </h4>
+                  <div className="space-y-2">
+                    {(categoriesByRound[String(round.id)] || []).map((category) => (
+                      <label
+                        key={category.id}
+                        className="flex items-center gap-3 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 hover:border-blue-400 transition"
+                      >
+                        <input
+                          type="checkbox"
+                          className="w-4 h-4"
+                          checked={selection[String(category.id)] || false}
+                          onChange={() => toggleCategory(String(category.id))}
+                        />
+                        <div className="flex-1">
+                          <p className="text-sm font-medium text-gray-800">{category.name}</p>
+                          <p className="text-xs text-gray-500">{category.percentage}% weight</p>
+                        </div>
+                        {selection[String(category.id)] && (
+                          <CheckSquare size={18} className="text-blue-500" />
+                        )}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              ))}
+          </div>
+        )}
+
+        <div className="flex gap-2 pt-4">
+          <Button type="button" variant="outline" onClick={onClose} className="flex-1">
+            Cancel
+          </Button>
+          <Button onClick={handleSave} disabled={saving} className="flex-1">
+            {saving ? 'Saving...' : 'Save Categories'}
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  )
+}
+
 export default function JudgesList() {
   const [judges, setJudges] = useState([])
   const [rounds, setRounds] = useState([])
+  const [categories, setCategories] = useState([])
   const [roundAssignments, setRoundAssignments] = useState({})
+  const [categoryAssignments, setCategoryAssignments] = useState({})
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [isAssignmentsModalOpen, setIsAssignmentsModalOpen] = useState(false)
+  const [isCategoriesModalOpen, setIsCategoriesModalOpen] = useState(false)
   const [editingJudge, setEditingJudge] = useState(null)
   const [loading, setLoading] = useState(true)
 
@@ -195,23 +351,35 @@ export default function JudgesList() {
       })
       .subscribe()
 
+    const categoryJudgesSubscription = supabase
+      .channel('category-judges-changes')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'category_judges' }, () => {
+        fetchData()
+      })
+      .subscribe()
+
     return () => {
       subscription.unsubscribe()
       assignmentsSubscription.unsubscribe()
+      categoryJudgesSubscription.unsubscribe()
     }
   }, [])
 
   const fetchData = async () => {
     setLoading(true)
-    const [judgesRes, roundsRes, assignmentsRes] = await Promise.all([
+    const [judgesRes, roundsRes, assignmentsRes, categoriesRes, categoryJudgesRes] = await Promise.all([
       supabase.from('judges').select('*').order('created_at', { ascending: false }),
       supabase.from('rounds').select('*').order('order_index'),
-      supabase.from('round_judges').select('round_id, judge_id')
+      supabase.from('round_judges').select('round_id, judge_id'),
+      supabase.from('categories').select('*').order('order_index'),
+      supabase.from('category_judges').select('category_id, judge_id')
     ])
 
     const judgesData = judgesRes.data || []
     const roundsData = roundsRes.data || []
     const assignmentsData = assignmentsRes.data || []
+    const categoriesData = categoriesRes.data || []
+    const categoryJudgesData = categoryJudgesRes.data || []
 
     const assignmentsMap = assignmentsData.reduce((acc, record) => {
       const judgeId = record.judge_id ? String(record.judge_id) : null
@@ -229,9 +397,27 @@ export default function JudgesList() {
       return result
     }, {})
 
+    const categoryAssignmentsMap = categoryJudgesData.reduce((acc, record) => {
+      const judgeId = record.judge_id ? String(record.judge_id) : null
+      const categoryId = record.category_id ? String(record.category_id) : null
+      if (!judgeId || !categoryId) return acc
+      if (!acc[judgeId]) {
+        acc[judgeId] = new Set()
+      }
+      acc[judgeId].add(categoryId)
+      return acc
+    }, {})
+
+    const normalizedCategoryAssignments = Object.entries(categoryAssignmentsMap).reduce((result, [judgeId, catSet]) => {
+      result[judgeId] = Array.from(catSet)
+      return result
+    }, {})
+
     setJudges(judgesData)
     setRounds(roundsData)
     setRoundAssignments(normalizedAssignments)
+    setCategories(categoriesData)
+    setCategoryAssignments(normalizedCategoryAssignments)
     setLoading(false)
   }
 
@@ -278,6 +464,11 @@ export default function JudgesList() {
     setIsAssignmentsModalOpen(true)
   }
 
+  const openCategoriesModal = (judge) => {
+    setEditingJudge(judge)
+    setIsCategoriesModalOpen(true)
+  }
+
   const handleSaveAssignments = async (selectedRoundIds) => {
     if (!editingJudge) return
 
@@ -318,6 +509,10 @@ export default function JudgesList() {
       console.error('Failed to update judge assignments:', error)
       toast.error('Unable to update judge assignments')
     }
+  }
+
+  const handleSaveCategoryAssignments = async () => {
+    await fetchData()
   }
 
   return (
@@ -420,10 +615,42 @@ export default function JudgesList() {
                         )
                       })()}
                     </div>
+
+                    {/* Categories for assigned rounds */}
+                    <div className="mt-3 space-y-2">
+                      <p className="text-xs font-semibold text-gray-500 uppercase flex items-center gap-2">
+                        <BookOpen size={14} /> Scoring Categories
+                      </p>
+                      {(() => {
+                        const assignedRoundIds = roundAssignments[String(judge.id)] || []
+                        if (!assignedRoundIds.length) {
+                          return <p className="text-xs text-gray-500">No categories in assigned rounds</p>
+                        }
+                        const judgeCategories = categories.filter((cat) => 
+                          assignedRoundIds.includes(String(cat.round_id))
+                        )
+                        if (!judgeCategories.length) {
+                          return <p className="text-xs text-gray-500">No categories in assigned rounds</p>
+                        }
+                        return (
+                          <div className="space-y-1">
+                            {judgeCategories.map((cat) => (
+                              <div
+                                key={cat.id}
+                                className="px-2 py-1.5 text-xs bg-amber-50 text-amber-700 rounded border border-amber-200 flex items-center justify-between"
+                              >
+                                <span className="font-medium">{cat.name}</span>
+                                <span className="text-xs bg-amber-100 px-1.5 py-0.5 rounded">{cat.percentage}%</span>
+                              </div>
+                            ))}
+                          </div>
+                        )
+                      })()}
+                    </div>
                   </div>
 
                   {/* Actions */}
-                  <div className="flex items-center gap-2 flex-shrink-0">
+                  <div className="flex items-center gap-2 flex-shrink-0 flex-wrap lg:flex-nowrap">
                     <Button
                       variant="outline"
                       size="sm"
@@ -439,6 +666,14 @@ export default function JudgesList() {
                     >
                       <ClipboardList size={16} className="mr-1" />
                       Assign Rounds
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => openCategoriesModal(judge)}
+                    >
+                      <Target size={16} className="mr-1" />
+                      Assign Categories
                     </Button>
                     <Button
                       variant="outline"
@@ -477,6 +712,19 @@ export default function JudgesList() {
         onSave={handleSaveAssignments}
         onClose={() => {
           setIsAssignmentsModalOpen(false)
+          setEditingJudge(null)
+        }}
+      />
+
+      <JudgeCategoriesModal
+        isOpen={isCategoriesModalOpen}
+        judge={editingJudge}
+        categories={categories}
+        rounds={rounds}
+        roundAssignments={roundAssignments}
+        onSave={handleSaveCategoryAssignments}
+        onClose={() => {
+          setIsCategoriesModalOpen(false)
           setEditingJudge(null)
         }}
       />

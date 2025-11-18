@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '@/lib/supabase'
-import { calculateAverages } from '@/lib/utils'
+import { computeCompetitionStandings } from '@/lib/scoring'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { toast } from 'sonner'
@@ -11,8 +11,12 @@ export default function ResultsBoard() {
   const [contestants, setContestants] = useState([])
   const [scores, setScores] = useState([])
   const [judges, setJudges] = useState([])
+  const [categories, setCategories] = useState([])
+  const [rounds, setRounds] = useState([])
+  const [roundAssignments, setRoundAssignments] = useState([])
+  const [categoryAssignments, setCategoryAssignments] = useState([])
   const [isLocked, setIsLocked] = useState(false)
-  const [rankings, setRankings] = useState([])
+  const [standings, setStandings] = useState({ overall: { rankings: [], byGender: {} }, rounds: [] })
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -21,7 +25,7 @@ export default function ResultsBoard() {
     // Subscribe to realtime updates
     const scoresSubscription = supabase
       .channel('results-scores')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'scores' }, () => {
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'contestant_scores' }, () => {
         fetchData()
       })
       .subscribe()
@@ -33,27 +37,99 @@ export default function ResultsBoard() {
       })
       .subscribe()
 
+    const categoryJudgesSubscription = supabase
+      .channel('results-category-judges')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'category_judges' }, () => {
+        fetchData()
+      })
+      .subscribe()
+
     return () => {
       scoresSubscription.unsubscribe()
       settingsSubscription.unsubscribe()
+      categoryJudgesSubscription.unsubscribe()
     }
   }, [])
 
   useEffect(() => {
-    calculateRankings()
-  }, [contestants, scores, judges])
+    if (!contestants.length || !categories.length) return
+    const roundJudgeTargets = rounds.reduce((acc, round) => {
+      if (!round?.id) return acc
+      const numeric = Number(round.judge_target)
+      if (Number.isFinite(numeric) && numeric > 0) {
+        acc[String(round.id)] = numeric
+      }
+      return acc
+    }, {})
+    const assignmentsMap = roundAssignments.reduce((acc, record) => {
+      const roundId = record.round_id ? String(record.round_id) : null
+      const judgeId = record.judge_id ? String(record.judge_id) : null
+      if (!roundId || !judgeId) return acc
+      if (!acc[roundId]) {
+        acc[roundId] = new Set()
+      }
+      acc[roundId].add(judgeId)
+      return acc
+    }, {})
+    const normalizedAssignments = Object.entries(assignmentsMap).reduce((result, [roundId, judgeSet]) => {
+      result[roundId] = Array.from(judgeSet)
+      return result
+    }, {})
+
+    const categoryAssignmentsMap = categoryAssignments.reduce((acc, record) => {
+      const categoryId = record.category_id ? String(record.category_id) : null
+      const judgeId = record.judge_id ? String(record.judge_id) : null
+      if (!categoryId || !judgeId) return acc
+      if (!acc[categoryId]) {
+        acc[categoryId] = new Set()
+      }
+      acc[categoryId].add(judgeId)
+      return acc
+    }, {})
+    const normalizedCategoryAssignments = Object.entries(categoryAssignmentsMap).reduce((result, [categoryId, judgeSet]) => {
+      result[categoryId] = Array.from(judgeSet)
+      return result
+    }, {})
+
+    const computed = computeCompetitionStandings({
+      contestants,
+      categories,
+      rounds,
+      scores,
+      judges,
+      roundJudgeTargets,
+      roundJudgeAssignments: normalizedAssignments,
+      categoryJudgeAssignments: normalizedCategoryAssignments
+    })
+    setStandings(computed)
+  }, [contestants, scores, judges, categories, rounds, roundAssignments, categoryAssignments])
 
   const fetchData = async () => {
     setLoading(true)
-    const [contestantsRes, scoresRes, judgesRes] = await Promise.all([
+    const [contestantsRes, categoriesRes, roundsRes, scoresRes, judgesRes, roundAssignmentsRes, categoryAssignmentsRes] = await Promise.all([
       supabase.from('contestants').select('*').order('number'),
-      supabase.from('scores').select('*'),
-      supabase.from('judges').select('*').eq('active', true)
+      supabase.from('categories').select('*, criteria(*)').order('order_index'),
+      supabase.from('rounds').select('*').order('order_index'),
+      supabase.from('contestant_scores').select('*'),
+      supabase.from('judges').select('*').eq('active', true),
+      supabase.from('round_judges').select('round_id, judge_id'),
+      supabase.from('category_judges').select('category_id, judge_id')
     ])
 
     setContestants(contestantsRes.data || [])
+    setCategories(categoriesRes.data || [])
+    const normalizedRounds = (roundsRes.data || []).map((round) => ({
+      ...round,
+      judge_target:
+        round.judge_target === null || round.judge_target === undefined
+          ? null
+          : Number(round.judge_target)
+    }))
+    setRounds(normalizedRounds)
     setScores(scoresRes.data || [])
     setJudges(judgesRes.data || [])
+    setRoundAssignments(roundAssignmentsRes.data || [])
+    setCategoryAssignments(categoryAssignmentsRes.data || [])
     setLoading(false)
     
     await fetchSettings()
@@ -67,31 +143,6 @@ export default function ResultsBoard() {
       .single()
 
     setIsLocked(data?.value === 'true')
-  }
-
-  const calculateRankings = () => {
-    const results = contestants.map(contestant => {
-      const contestantScores = scores.filter(s => s.contestant_id === contestant.id)
-      const averages = calculateAverages(contestantScores, judges.length)
-      
-      return {
-        ...contestant,
-        averages,
-        totalAverage: parseFloat(averages.total || 0),
-        scoresReceived: contestantScores.length,
-        completionRate: judges.length > 0 ? (contestantScores.length / judges.length * 100).toFixed(0) : 0
-      }
-    })
-
-    // Sort by total average (descending)
-    results.sort((a, b) => b.totalAverage - a.totalAverage)
-    
-    // Add rank
-    results.forEach((result, index) => {
-      result.rank = index + 1
-    })
-
-    setRankings(results)
   }
 
   const handleToggleLock = async () => {
@@ -112,16 +163,14 @@ export default function ResultsBoard() {
 
   const exportResults = () => {
     // Create CSV content
-    const headers = ['Rank', 'No.', 'Contestant', 'Category 1 (60%)', 'Category 2 (20%)', 'Category 3 (20%)', 'Weighted Total', 'Progress']
-    const rows = rankings.map(r => [
-      r.rank,
-      r.number,
-      r.name,
-      r.averages.cat1_total || '0.00',
-      r.averages.cat2_total || '0.00',
-      r.averages.cat3_total || '0.00',
-      r.averages.weighted_total || '0.00',
-      `${r.completionRate}%`
+    const headers = ['Rank', 'No.', 'Contestant', 'Score', 'Completion Rate', 'Submission Count']
+    const rows = standings.overall.rankings.map((r, idx) => [
+      idx + 1,
+      r.contestant.number,
+      r.contestant.name,
+      r.totalWeightedScore.toFixed(2),
+      `${r.completionRate}%`,
+      r.totalScoresReceived
     ])
 
     const csvContent = [
@@ -150,8 +199,12 @@ export default function ResultsBoard() {
     return 'from-blue-400 to-blue-600'
   }
 
-  const completionPercentage = judges.length > 0 && contestants.length > 0
-    ? Math.round((scores.length / (judges.length * contestants.length)) * 100)
+  // Calculate overall completion percentage
+  const totalExpectedScores = judges.length > 0 && contestants.length > 0
+    ? judges.length * contestants.length * categories.reduce((sum, cat) => sum + (cat.criteria?.length || 0), 0)
+    : 0
+  const completionPercentage = totalExpectedScores > 0
+    ? Math.round((scores.length / totalExpectedScores) * 100)
     : 0
 
   return (
@@ -238,7 +291,7 @@ export default function ResultsBoard() {
           )}
         </Button>
 
-        <Button onClick={exportResults} variant="outline" size="lg" disabled={rankings.length === 0}>
+        <Button onClick={exportResults} variant="outline" size="lg" disabled={standings.overall.rankings.length === 0}>
           <Download className="mr-2" size={20} />
           Export CSV
         </Button>
@@ -265,7 +318,7 @@ export default function ResultsBoard() {
               <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div>
               <p className="mt-4 text-gray-500">Loading results...</p>
             </div>
-          ) : rankings.length === 0 ? (
+          ) : standings.overall.rankings.length === 0 ? (
             <div className="py-12 text-center">
               <Trophy size={48} className="mx-auto text-gray-400 mb-4" />
               <p className="text-gray-500">No scores yet. Waiting for judges to submit scores.</p>
@@ -278,54 +331,42 @@ export default function ResultsBoard() {
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Rank</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">No.</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Contestant</th>
-                    <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">
-                      Cat 1<br/><span className="text-[10px] font-normal">(60%)</span>
-                    </th>
-                    <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">
-                      Cat 2<br/><span className="text-[10px] font-normal">(20%)</span>
-                    </th>
-                    <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">
-                      Cat 3<br/><span className="text-[10px] font-normal">(20%)</span>
-                    </th>
-                    <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">Weighted Total</th>
-                    <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">Progress</th>
+                    <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">Score</th>
+                    <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">Submissions</th>
+                    <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">Completion</th>
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-gray-200">
-                  {rankings.map((contestant) => (
-                    <tr key={contestant.id} className="hover:bg-gray-50">
+                  {standings.overall.rankings.map((entry, idx) => (
+                    <tr key={entry.contestant.id} className="hover:bg-gray-50">
                       <td className="px-6 py-4">
-                        <div className={`w-10 h-10 rounded-full bg-gradient-to-br ${getRankBadgeColor(contestant.rank)} flex items-center justify-center text-white font-bold`}>
-                          {contestant.rank}
+                        <div className={`w-10 h-10 rounded-full bg-gradient-to-br ${getRankBadgeColor(idx + 1)} flex items-center justify-center text-white font-bold`}>
+                          {idx + 1}
                         </div>
                       </td>
                       <td className="px-6 py-4">
                         <div className="w-8 h-8 rounded-full bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center text-white font-bold text-sm">
-                          {contestant.number}
+                          {entry.contestant.number}
                         </div>
                       </td>
                       <td className="px-6 py-4">
-                        <div className="font-medium text-gray-900">{contestant.name}</div>
+                        <div className="font-medium text-gray-900">{entry.contestant.name}</div>
                       </td>
-                      <td className="px-6 py-4 text-center text-sm">{contestant.averages.cat1_total || '-'}</td>
-                      <td className="px-6 py-4 text-center text-sm">{contestant.averages.cat2_total || '-'}</td>
-                      <td className="px-6 py-4 text-center text-sm">{contestant.averages.cat3_total || '-'}</td>
                       <td className="px-6 py-4 text-center">
                         <span className="text-lg font-bold text-blue-600">
-                          {contestant.averages.weighted_total || '-'}
+                          {entry.totalWeightedScore.toFixed(2)}
                         </span>
                       </td>
+                      <td className="px-6 py-4 text-center text-sm">{entry.totalScoresReceived}</td>
                       <td className="px-6 py-4 text-center">
                         <div className="flex items-center justify-center gap-2">
                           <div className="w-full max-w-[100px] bg-gray-200 rounded-full h-2">
                             <div
                               className="bg-green-500 h-2 rounded-full transition-all"
-                              style={{ width: `${contestant.completionRate}%` }}
+                              style={{ width: `${entry.completionRate}%` }}
                             />
                           </div>
-                          <span className="text-xs font-medium text-gray-600 whitespace-nowrap">
-                            {contestant.scoresReceived}/{judges.length}
-                          </span>
+                          <span className="text-xs font-medium text-gray-600">{entry.completionRate}%</span>
                         </div>
                       </td>
                     </tr>

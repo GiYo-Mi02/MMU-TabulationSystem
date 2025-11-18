@@ -28,6 +28,7 @@ export default function JudgePageNew() {
   const [activeRoundId, setActiveRoundId] = useState(null)
   const [activeRoundName, setActiveRoundName] = useState('Current Round')
   const [judgesCount, setJudgesCount] = useState(0)
+  const [categoryAssignments, setCategoryAssignments] = useState(new Set())
 
   useEffect(() => {
     if (rounds.length === 0) return
@@ -86,6 +87,13 @@ export default function JudgePageNew() {
       setActiveCategory(categories[0]?.id || null)
     }
   }, [categories, activeCategory])
+
+  useEffect(() => {
+    // Refetch categories when category assignments change
+    if (judge) {
+      fetchCategories()
+    }
+  }, [categoryAssignments])
 
   useEffect(() => {
     fetchJudgeData()
@@ -232,6 +240,7 @@ export default function JudgePageNew() {
 
     // Subscribe to assistance requests changes (for this judge)
     let assistanceSubscription = null
+    let categoryJudgesSubscription = null
     
     if (judge) {
       console.log('Setting up assistance subscription for judge:', judge.id, judge.name)
@@ -278,6 +287,22 @@ export default function JudgePageNew() {
             console.error('❌ Error subscribing to assistance updates')
           }
         })
+
+      // Subscribe to category judge assignments changes
+      categoryJudgesSubscription = supabase
+        .channel('category-judges-realtime')
+        .on('postgres_changes', {
+          event: '*',
+          schema: 'public',
+          table: 'category_judges',
+          filter: `judge_id=eq.${judge.id}`
+        }, (payload) => {
+          console.log('Judge category assignments changed:', payload)
+          fetchJudgeCategoryAssignments(judge.id)
+        })
+        .subscribe((status) => {
+          console.log('Category judges subscription status:', status)
+        })
     }
 
     return () => {
@@ -289,6 +314,9 @@ export default function JudgePageNew() {
       supabase.removeChannel(contestantsSubscription)
       if (assistanceSubscription) {
         supabase.removeChannel(assistanceSubscription)
+      }
+      if (categoryJudgesSubscription) {
+        supabase.removeChannel(categoryJudgesSubscription)
       }
       supabase.removeChannel(roundsSubscription)
       supabase.removeChannel(judgesSubscription)
@@ -345,6 +373,24 @@ export default function JudgePageNew() {
     }
 
     setJudge(data)
+    
+    // Fetch this judge's category assignments
+    await fetchJudgeCategoryAssignments(data.id)
+  }
+
+  const fetchJudgeCategoryAssignments = async (judgeId) => {
+    const { data, error } = await supabase
+      .from('category_judges')
+      .select('category_id')
+      .eq('judge_id', judgeId)
+
+    if (error) {
+      console.error('Failed to load category assignments:', error)
+      return
+    }
+
+    const assignedCategoryIds = new Set((data || []).map(d => String(d.category_id)))
+    setCategoryAssignments(assignedCategoryIds)
   }
 
   const fetchContestants = async () => {
@@ -421,7 +467,16 @@ export default function JudgePageNew() {
       }
     })
 
-    setAllCategories(normalizedCategories)
+    // Filter categories based on judge's category assignments
+    // If no category assignments exist (fallback), show all categories
+    let filteredCategories = normalizedCategories
+    if (categoryAssignments.size > 0) {
+      filteredCategories = normalizedCategories.filter(cat => 
+        categoryAssignments.has(String(cat.id))
+      )
+    }
+
+    setAllCategories(filteredCategories)
 
     const overrideRoundId = roundIdOverride ? String(roundIdOverride) : null
 
@@ -430,7 +485,7 @@ export default function JudgePageNew() {
     }
 
     if (!overrideRoundId && !activeRoundId) {
-      const roundFromCategories = normalizedCategories.find((cat) => cat.round_id)
+      const roundFromCategories = filteredCategories.find((cat) => cat.round_id)
       if (roundFromCategories?.round_id) {
         const derivedRoundId = String(roundFromCategories.round_id)
         setActiveRoundId(derivedRoundId)

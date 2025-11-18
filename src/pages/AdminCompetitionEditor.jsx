@@ -34,7 +34,8 @@ export default function AdminCompetitionEditor() {
     description: '',
     percentage: '',
     round_id: '',
-    criteria: []
+    criteria: [],
+    judge_allocation: ''
   })
   
   // Temporary criteria being added
@@ -436,7 +437,8 @@ export default function AdminCompetitionEditor() {
         description: category.description || '',
         percentage: category.percentage || '',
         round_id: category.round_id ? String(category.round_id) : activeRoundId || '',
-        criteria: category.criteria || []
+        criteria: category.criteria || [],
+        judge_allocation: category.judge_allocation || ''
       })
     } else {
       setEditingCategory(null)
@@ -445,7 +447,8 @@ export default function AdminCompetitionEditor() {
         description: '',
         percentage: '',
         round_id: activeRoundId || (rounds[0]?.id ? String(rounds[0].id) : ''),
-        criteria: []
+        criteria: [],
+        judge_allocation: ''
       })
     }
     setIsAddModalOpen(true)
@@ -537,7 +540,8 @@ export default function AdminCompetitionEditor() {
             name: categoryForm.name,
             description: categoryForm.description,
             percentage: parseFloat(categoryForm.percentage),
-            round_id: categoryForm.round_id
+            round_id: categoryForm.round_id,
+            judge_allocation: categoryForm.judge_allocation ? parseInt(categoryForm.judge_allocation) : null
           })
           .eq('id', editingCategory.id)
 
@@ -558,6 +562,7 @@ export default function AdminCompetitionEditor() {
             description: categoryForm.description,
             percentage: parseFloat(categoryForm.percentage),
             round_id: categoryForm.round_id,
+            judge_allocation: categoryForm.judge_allocation ? parseInt(categoryForm.judge_allocation) : null,
             order_index: categories.length
           })
           .select()
@@ -588,7 +593,8 @@ export default function AdminCompetitionEditor() {
         description: '',
         percentage: '',
         round_id: activeRoundId || rounds[0]?.id || '',
-        criteria: []
+        criteria: [],
+        judge_allocation: ''
       })
       fetchCategories()
     } catch (error) {
@@ -925,6 +931,11 @@ export default function AdminCompetitionEditor() {
                                             {category.criteria?.reduce((sum, c) => sum + (c.max_points || 0), 0) || 0}/100 pts
                                           </span>
                                         </p>
+                                        {category.judge_allocation && (
+                                          <p className="text-xs text-primary font-medium bg-primary/10 px-2 py-1 rounded">
+                                            📊 {category.judge_allocation} judges assigned
+                                          </p>
+                                        )}
                                       </div>
                                     </div>
                                   </div>
@@ -1099,6 +1110,20 @@ export default function AdminCompetitionEditor() {
               </div>
               <p className="text-xs text-muted-foreground mt-1">
                 Round allocation total: {getTotalPercentage(categoryForm.round_id)}% / 100%
+              </p>
+            </div>
+
+            <div>
+              <Label>Judge Allocation for This Category (Optional)</Label>
+              <Input
+                type="number"
+                min="0"
+                placeholder="Leave blank to use round-level allocation"
+                value={categoryForm.judge_allocation}
+                onChange={(e) => setCategoryForm({ ...categoryForm, judge_allocation: e.target.value })}
+              />
+              <p className="text-xs text-muted-foreground mt-1">
+                Override the round-level judge count for this specific category. Useful when some judges only score certain categories.
               </p>
             </div>
           </div>

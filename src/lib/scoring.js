@@ -91,6 +91,10 @@ const calculateContestantRoundScore = ({
       );
       const average = sum / entries.length;
 
+      // Normalize this criterion's average by its max points
+      const normalizedCriterionScore =
+        (average / (criterion.max_points || 1)) * 100;
+
       criteriaDetails.push({
         id: criterion.id,
         name: criterion.name,
@@ -99,14 +103,13 @@ const calculateContestantRoundScore = ({
         submissions: entries.length,
       });
 
-      categoryTotal += average;
+      // Add the normalized criterion score (not the raw average)
+      categoryTotal += normalizedCriterionScore;
       categoryScoresReceived += entries.length;
     });
 
-    const categoryMax = criteria.reduce(
-      (sum, criterion) => sum + (criterion.max_points || 0),
-      0
-    );
+    // For categoryMax, use 100 since we're now storing normalized percentages
+    const categoryMax = 100 * (criteria.length || 1);
 
     perCategoryStats.push({
       category,
@@ -147,17 +150,23 @@ const calculateContestantRoundScore = ({
         categoryMax > 0 ? (categoryTotal / categoryMax) * 100 : 0;
       const rawWeighted = rawNormalized * ((category.percentage || 0) / 100);
 
-      const expectedCategoryScores = effectiveJudgeCount
-        ? effectiveJudgeCount * criteriaLength
-        : categoryScoresReceived;
+      // Calculate expected scores based on judges ASSIGNED TO THIS CATEGORY
+      // If the category has allowedJudgeIds, use that count; otherwise use effectiveJudgeCount
+      const assignedJudgesForCategory = category.allowedJudgeIds
+        ? category.allowedJudgeIds.length
+        : effectiveJudgeCount || 1;
+
+      const expectedCategoryScores = assignedJudgesForCategory * criteriaLength;
 
       const categoryCompletionRatio =
         expectedCategoryScores > 0
           ? Math.min(categoryScoresReceived / expectedCategoryScores, 1)
           : 0;
 
-      const normalized = rawNormalized * categoryCompletionRatio;
-      const weighted = rawWeighted * categoryCompletionRatio;
+      // Don't apply completion ratio to the score - it should only track completeness
+      // The score itself (rawNormalized/rawWeighted) is already what it is based on submissions received
+      const normalized = rawNormalized;
+      const weighted = rawWeighted;
 
       totalWeightedScoreRaw += rawWeighted;
       totalWeightedScore += weighted;
@@ -178,9 +187,12 @@ const calculateContestantRoundScore = ({
     }
   );
 
-  const expectedScores = effectiveJudgeCount
-    ? effectiveJudgeCount * criteriaCount
-    : totalScoresReceived;
+  const expectedScores = perCategoryStats.reduce((total, stats) => {
+    const assignedJudgesForCategory = stats.category.allowedJudgeIds
+      ? stats.category.allowedJudgeIds.length
+      : effectiveJudgeCount || 1;
+    return total + assignedJudgesForCategory * (stats.criteriaCount || 1);
+  }, 0);
 
   const completionRatio =
     expectedScores > 0 ? Math.min(totalScoresReceived / expectedScores, 1) : 0;
@@ -303,6 +315,7 @@ export const computeCompetitionStandings = ({
   judges = [],
   roundJudgeTargets = {},
   roundJudgeAssignments = {},
+  categoryJudgeAssignments = {},
 }) => {
   const normalizedTargets = Object.entries(roundJudgeTargets || {}).reduce(
     (acc, [key, value]) => {
@@ -335,6 +348,20 @@ export const computeCompetitionStandings = ({
     return acc;
   }, {});
 
+  const normalizedCategoryJudgeAssignments = Object.entries(
+    categoryJudgeAssignments || {}
+  ).reduce((acc, [categoryId, judgeIds]) => {
+    const idsArray = Array.isArray(judgeIds)
+      ? judgeIds.map((id) => String(id))
+      : [];
+    const active = idsArray.filter((id) => activeJudgeIds.has(id));
+    acc[String(categoryId)] = {
+      all: idsArray,
+      active,
+    };
+    return acc;
+  }, {});
+
   const activeJudgeCount = activeJudgeIds.size || judges.length || 0;
   const maxAssignmentCount = Object.values(normalizedAssignments).reduce(
     (max, info) => (info.active.length > max ? info.active.length : max),
@@ -354,11 +381,20 @@ export const computeCompetitionStandings = ({
   const normalizedCategories = (categories || []).map((category) => {
     const roundId = category.round_id || category.round?.id || null;
     const roundKey = roundId ? String(roundId) : null;
+    const categoryKey = category.id ? String(category.id) : null;
     const assignmentInfo = roundKey ? normalizedAssignments[roundKey] : null;
+
+    // Use category-specific judge assignments if available, otherwise use round assignments
+    const categoryAssignmentInfo = categoryKey
+      ? normalizedCategoryJudgeAssignments[categoryKey]
+      : null;
+    const judgeIds =
+      categoryAssignmentInfo?.active || assignmentInfo?.active || [];
+
     return {
       ...category,
       round_id: roundKey,
-      allowedJudgeIds: assignmentInfo?.active || [],
+      allowedJudgeIds: judgeIds,
     };
   });
 

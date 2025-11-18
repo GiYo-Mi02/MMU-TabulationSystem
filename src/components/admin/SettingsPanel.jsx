@@ -87,7 +87,7 @@ export default function SettingsPanel() {
     }
 
     const { error } = await supabase
-      .from('scores')
+      .from('contestant_scores')
       .delete()
       .neq('id', '00000000-0000-0000-0000-000000000000') // Delete all
 
@@ -108,7 +108,7 @@ export default function SettingsPanel() {
       return
     }
 
-    const { error: scoresError } = await supabase.from('scores').delete().neq('id', '00000000-0000-0000-0000-000000000000')
+    const { error: scoresError } = await supabase.from('contestant_scores').delete().neq('id', '00000000-0000-0000-0000-000000000000')
     const { error: judgesError } = await supabase.from('judges').delete().neq('id', '00000000-0000-0000-0000-000000000000')
     const { error: contestantsError } = await supabase.from('contestants').delete().neq('id', '00000000-0000-0000-0000-000000000000')
 
