@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from 'react'
 import { supabase } from '@/lib/supabase'
-import { Trophy, Crown, Medal, Sparkles } from 'lucide-react'
+import { Trophy, Crown, Medal, Sparkles, EyeOff } from 'lucide-react'
 import LiveIndicator from '@/components/ui/LiveIndicator'
 import { computeCompetitionStandings } from '@/lib/scoring'
 
@@ -14,6 +14,7 @@ export default function PublicLeaderboard() {
   const [standings, setStandings] = useState({ overall: { rankings: [], byGender: {} }, rounds: [] })
   const [selectedRoundId, setSelectedRoundId] = useState('overall')
   const [selectedGender, setSelectedGender] = useState('all')
+  const [scoresVisible, setScoresVisible] = useState(true)
 
   useEffect(() => {
     fetchData()
@@ -25,8 +26,18 @@ export default function PublicLeaderboard() {
       })
       .subscribe()
 
+    const settingsSubscription = supabase
+      .channel('public-settings')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'settings' }, (payload) => {
+        if (payload.new?.key === 'scores_visible') {
+          setScoresVisible(payload.new.value === 'true')
+        }
+      })
+      .subscribe()
+
     return () => {
       scoresSubscription.unsubscribe()
+      settingsSubscription.unsubscribe()
     }
   }, [])
 
@@ -67,17 +78,56 @@ export default function PublicLeaderboard() {
   }, [contestants, categories, rounds, scores, judges, roundAssignments])
 
   const fetchData = async () => {
-    const [contestantsRes, categoriesRes, roundsRes, scoresRes, judgesRes, roundAssignmentsRes] = await Promise.all([
+    // Fetch scores with pagination to bypass 1000-row limit
+    let allScores = []
+    let offset = 0
+    const pageSize = 1000
+    let hasMore = true
+    
+    while (hasMore) {
+      const scoresRes = await supabase
+        .from('contestant_scores')
+        .select('*')
+        .range(offset, offset + pageSize - 1)
+      
+      if (scoresRes.error) {
+        console.error('Error fetching scores at offset', offset, ':', scoresRes.error)
+        break
+      }
+      
+      if (!scoresRes.data || scoresRes.data.length === 0) {
+        hasMore = false
+        break
+      }
+      
+      allScores = [...allScores, ...scoresRes.data]
+      
+      if (scoresRes.data.length < pageSize) {
+        hasMore = false
+      } else {
+        offset += pageSize
+      }
+    }
+
+    const [contestantsRes, categoriesRes, roundsRes, judgesRes, roundAssignmentsRes, settingsRes] = await Promise.all([
       supabase.from('contestants').select('*').order('number'),
       supabase
         .from('categories')
         .select('*, round:rounds(*), criteria(*)')
         .order('order_index'),
       supabase.from('rounds').select('*').order('order_index'),
-      supabase.from('contestant_scores').select('*'),
       supabase.from('judges').select('*').eq('active', true),
-      supabase.from('round_judges').select('round_id, judge_id')
+      supabase.from('round_judges').select('round_id, judge_id'),
+      supabase.from('settings').select('*')
     ])
+
+    // Update score visibility from settings
+    if (settingsRes.data) {
+      const visibleSetting = settingsRes.data.find(s => s.key === 'scores_visible')
+      if (visibleSetting) {
+        setScoresVisible(visibleSetting.value === 'true')
+      }
+    }
 
     setContestants(contestantsRes.data || [])
     setCategories(categoriesRes.data || [])
@@ -89,7 +139,7 @@ export default function PublicLeaderboard() {
           : Number(round.judge_target)
     }))
     setRounds(normalizedRounds)
-    setScores(scoresRes.data || [])
+    setScores(allScores)
     setJudges(judgesRes.data || [])
     setRoundAssignments(roundAssignmentsRes.data || [])
 
@@ -189,7 +239,22 @@ export default function PublicLeaderboard() {
         <p className="text-sm text-gray-400 mt-2">{judgeCountDisplay}</p>
       </div>
 
+      {/* Confidentiality Mode Indicator */}
+      {!scoresVisible && (
+        <div className="max-w-6xl mx-auto mb-8 bg-gradient-to-r from-yellow-600 to-yellow-700 rounded-2xl p-6 border-2 border-yellow-500 shadow-lg">
+          <div className="flex items-center justify-center gap-3">
+            <EyeOff size={32} className="text-white animate-pulse" />
+            <div className="text-center">
+              <h3 className="text-2xl font-bold text-white">CONFIDENTIAL MODE</h3>
+              <p className="text-yellow-100 text-lg mt-1">Scores are temporarily hidden from public display</p>
+            </div>
+            <EyeOff size={32} className="text-white animate-pulse" />
+          </div>
+        </div>
+      )}
+
       {/* Controls */}
+      {scoresVisible && (
       <div className="max-w-6xl mx-auto mb-8">
         <div className="bg-black/40 border border-yellow-600/20 rounded-2xl p-6 flex flex-col lg:flex-row gap-4 lg:items-center lg:justify-between">
           <div className="flex flex-wrap gap-2">
@@ -231,13 +296,14 @@ export default function PublicLeaderboard() {
           </div>
         </div>
       </div>
+      )}
 
       {/* Top 3 Podium */}
-      {topThree.length === 3 && (
+      {scoresVisible && topThree.length === 3 && (
         <div className="max-w-6xl mx-auto mb-12">
           <div className="flex flex-col md:flex-row md:items-end md:justify-center gap-6">
             {topThree.map((entry, index) => {
-              const rank = entry.overallRank || index + 1
+              const rank = selectedGender !== 'all' ? (entry.genderRank || index + 1) : (entry.overallRank || index + 1)
               const contestant = entry.contestant || {}
               const containerStyles =
                 rank === 1
@@ -274,6 +340,7 @@ export default function PublicLeaderboard() {
       )}
 
       {/* Full Rankings */}
+      {scoresVisible && (
       <div className="max-w-6xl mx-auto">
         <div className="bg-gradient-to-br from-gray-900 to-black backdrop-blur-lg rounded-2xl p-8 shadow-2xl border border-yellow-600/30">
           <div className="flex items-center justify-between flex-wrap gap-3 mb-6">
@@ -298,7 +365,7 @@ export default function PublicLeaderboard() {
             <div className="space-y-3">
               {displayRankings.map((entry, index) => {
                 const contestant = entry.contestant || {}
-                const rank = entry.overallRank || index + 1
+                const rank = selectedGender !== 'all' ? (entry.genderRank || index + 1) : (entry.overallRank || index + 1)
                 return (
                   <div
                     key={`${contestant.id}-${rank}`}
@@ -342,14 +409,37 @@ export default function PublicLeaderboard() {
           )}
         </div>
       </div>
+      )}
 
       {/* Auto-refresh indicator */}
+      {scoresVisible && (
       <div className="text-center mt-8 text-gray-400">
         <div className="inline-flex items-center gap-2">
           <div className="w-2 h-2 bg-yellow-400 rounded-full animate-pulse"></div>
           <span className="text-sm">Live Updates Active</span>
         </div>
       </div>
+      )}
+
+      {/* Confidential Mode Message */}
+      {!scoresVisible && (
+      <div className="max-w-6xl mx-auto">
+        <div className="min-h-96 bg-gradient-to-br from-yellow-900 to-yellow-950 backdrop-blur-lg rounded-2xl p-12 shadow-2xl border-2 border-yellow-600 flex flex-col items-center justify-center text-center">
+          <EyeOff size={80} className="text-yellow-400 mb-6 opacity-80" />
+          <h2 className="text-5xl font-bold text-white mb-4">SCORES HIDDEN</h2>
+          <p className="text-2xl text-yellow-100 mb-6">Confidential Mode is Currently Active</p>
+          <div className="bg-black/40 rounded-lg p-6 border border-yellow-500/50 max-w-md">
+            <p className="text-lg text-yellow-50 mb-3">
+              🔒 Scores are temporarily hidden from public display
+            </p>
+            <p className="text-gray-300">
+              This is typically during commercials, breaks, or other sensitive segments. Scores will return shortly.
+            </p>
+          </div>
+        </div>
+      </div>
+      )}
+
 
       <style>{`
         @keyframes fade-in {

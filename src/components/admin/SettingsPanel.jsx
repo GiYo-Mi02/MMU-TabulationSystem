@@ -5,11 +5,12 @@ import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { Label } from '@/components/ui/Label'
 import { toast } from 'sonner'
-import { Save, Lock, Unlock, FileText, Trash2, AlertTriangle } from 'lucide-react'
+import { Save, Lock, Unlock, FileText, Trash2, AlertTriangle, Eye, EyeOff } from 'lucide-react'
 
 export default function SettingsPanel() {
   const [roundName, setRoundName] = useState('Main Round')
   const [isLocked, setIsLocked] = useState(false)
+  const [scoresVisible, setScoresVisible] = useState(true)
   const [loading, setLoading] = useState(false)
 
   useEffect(() => {
@@ -36,9 +37,11 @@ export default function SettingsPanel() {
     if (data) {
       const locked = data.find(s => s.key === 'is_locked')
       const round = data.find(s => s.key === 'round_name')
+      const visible = data.find(s => s.key === 'scores_visible')
       
       if (locked) setIsLocked(locked.value === 'true')
       if (round) setRoundName(round.value || 'Main Round')
+      if (visible) setScoresVisible(visible.value === 'true')
     }
   }
 
@@ -75,6 +78,23 @@ export default function SettingsPanel() {
 
     setIsLocked(newValue)
     toast.success(newValue ? 'Scoring locked!' : 'Scoring unlocked!')
+  }
+
+  const handleToggleScoresVisibility = async () => {
+    const newValue = !scoresVisible
+
+    const { error } = await supabase
+      .from('settings')
+      .update({ value: newValue.toString() })
+      .eq('key', 'scores_visible')
+
+    if (error) {
+      toast.error('Failed to update score visibility')
+      return
+    }
+
+    setScoresVisible(newValue)
+    toast.success(newValue ? 'Scores are now visible' : 'Scores are now hidden - Confidential mode ON')
   }
 
   const handleResetScores = async () => {
@@ -205,7 +225,58 @@ export default function SettingsPanel() {
         </CardContent>
       </Card>
 
-      {/* Danger Zone */}
+      {/* Score Visibility Control */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            {scoresVisible ? <Eye size={20} /> : <EyeOff size={20} />}
+            Score Confidentiality
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex items-center justify-between p-4 border border-gray-200 rounded-lg">
+            <div>
+              <h4 className="font-medium text-gray-900">Score Display Status</h4>
+              <p className="text-sm text-gray-600 mt-1">
+                {scoresVisible 
+                  ? 'Scores are visible on public leaderboards and displays' 
+                  : 'Scores are hidden - Confidential mode is ON'}
+              </p>
+            </div>
+            <Button
+              onClick={handleToggleScoresVisibility}
+              variant={scoresVisible ? 'default' : 'destructive'}
+              size="lg"
+            >
+              {scoresVisible ? (
+                <>
+                  <EyeOff className="mr-2" size={16} />
+                  Hide Scores
+                </>
+              ) : (
+                <>
+                  <Eye className="mr-2" size={16} />
+                  Show Scores
+                </>
+              )}
+            </Button>
+          </div>
+
+          {!scoresVisible && (
+            <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+              <div className="flex items-start gap-2">
+                <EyeOff className="text-yellow-600 flex-shrink-0 mt-0.5" size={18} />
+                <div>
+                  <h4 className="font-medium text-yellow-900">Confidential Mode Active</h4>
+                  <p className="text-sm text-yellow-700 mt-1">
+                    All scores are hidden from public view. Use this during commercials, breaks, or sensitive segments. Judges and admin can still see scores.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
       <Card className="border-red-200">
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-red-600">

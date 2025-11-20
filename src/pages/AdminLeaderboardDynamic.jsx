@@ -70,9 +70,39 @@ export default function AdminLeaderboardDynamic() {
   }, [contestants, categories, scores, rounds, judges, roundAssignments])
 
   const fetchData = async () => {
-    const [contestantsRes, scoresRes, judgesRes, categoriesRes, roundsRes, roundAssignmentsRes] = await Promise.all([
+    // Fetch scores with pagination to bypass 1000-row limit
+    let allScores = []
+    let offset = 0
+    const pageSize = 1000
+    let hasMore = true
+    
+    while (hasMore) {
+      const scoresRes = await supabase
+        .from('contestant_scores')
+        .select('*')
+        .range(offset, offset + pageSize - 1)
+      
+      if (scoresRes.error) {
+        console.error('Error fetching scores at offset', offset, ':', scoresRes.error)
+        break
+      }
+      
+      if (!scoresRes.data || scoresRes.data.length === 0) {
+        hasMore = false
+        break
+      }
+      
+      allScores = [...allScores, ...scoresRes.data]
+      
+      if (scoresRes.data.length < pageSize) {
+        hasMore = false
+      } else {
+        offset += pageSize
+      }
+    }
+
+    const [contestantsRes, judgesRes, categoriesRes, roundsRes, roundAssignmentsRes] = await Promise.all([
       supabase.from('contestants').select('*').order('number'),
-      supabase.from('contestant_scores').select('*'),
       supabase.from('judges').select('*').eq('active', true),
       supabase
         .from('categories')
@@ -87,7 +117,7 @@ export default function AdminLeaderboardDynamic() {
     const roundsData = roundsRes.data || []
 
     setContestants(contestantsData)
-    setScores(scoresRes.data || [])
+    setScores(allScores)
     setJudges(judgesRes.data || [])
     setCategories(categoriesData)
     setRounds(roundsData)
@@ -181,7 +211,7 @@ export default function AdminLeaderboardDynamic() {
       }, {}) || {}
 
       return [
-        entry.overallRank || index + 1,
+        selectedGender !== 'all' ? (entry.genderRank || index + 1) : (entry.overallRank || index + 1),
         contestant.number,
         contestant.name,
         contestant.sex || contestant.gender || 'N/A',
@@ -418,8 +448,8 @@ export default function AdminLeaderboardDynamic() {
                       return (
                         <tr key={contestant.id} className="border-b border-border hover:bg-secondary/50">
                         <td className="p-4">
-                          <div className={`w-10 h-10 rounded-full bg-gradient-to-br ${getRankColor(entry.overallRank)} flex items-center justify-center text-white font-bold text-lg`}>
-                            {entry.overallRank}
+                          <div className={`w-10 h-10 rounded-full bg-gradient-to-br ${getRankColor(selectedGender !== 'all' ? (entry.genderRank || 1) : entry.overallRank)} flex items-center justify-center text-white font-bold text-lg`}>
+                            {selectedGender !== 'all' ? (entry.genderRank || 1) : entry.overallRank}
                           </div>
                         </td>
                         <td className="p-4">

@@ -295,9 +295,21 @@ const computeRoundRankings = ({
     other: [],
   };
 
+  // Sort each gender group separately and assign gender-specific ranks
   rankings.forEach((entry) => {
     byGender[entry.gender] = byGender[entry.gender] || [];
     byGender[entry.gender].push(entry);
+  });
+
+  // Re-rank within each gender group (so #1 male, #1 female, etc. have their own rank 1)
+  Object.keys(byGender).forEach((gender) => {
+    byGender[gender].sort(
+      (a, b) => b.totalWeightedScore - a.totalWeightedScore
+    );
+    byGender[gender] = byGender[gender].map((entry, index) => ({
+      ...entry,
+      genderRank: index + 1,
+    }));
   });
 
   return {
@@ -440,6 +452,17 @@ export const computeCompetitionStandings = ({
   overallRankings.forEach((entry) => {
     overallByGender[entry.gender] = overallByGender[entry.gender] || [];
     overallByGender[entry.gender].push(entry);
+  });
+
+  // Re-rank within each gender group for overall standings
+  Object.keys(overallByGender).forEach((gender) => {
+    overallByGender[gender].sort(
+      (a, b) => b.totalWeightedScore - a.totalWeightedScore
+    );
+    overallByGender[gender] = overallByGender[gender].map((entry, index) => ({
+      ...entry,
+      genderRank: index + 1,
+    }));
   });
 
   let currentContestants = contestants;

@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { useParams } from 'react-router-dom'
 import { supabase } from '@/lib/supabase'
 import { toast, Toaster } from 'sonner'
-import { Menu, BookOpen, HelpCircle, LogOut, ChevronDown, ChevronUp, X, ChevronLeft, ChevronRight, Bell, AlertCircle } from 'lucide-react'
+import { Menu, BookOpen, HelpCircle, LogOut, ChevronDown, ChevronUp, X, ChevronLeft, ChevronRight, Bell, AlertCircle, User, CheckCircle, RotateCcw, Headphones, User2, Smartphone, Settings, BarChart3, AlertTriangle, MessageSquare, Phone, Mail, Eye, Users, EyeOff } from 'lucide-react'
 
 export default function JudgePageNew() {
   const { token } = useParams()
@@ -17,7 +17,7 @@ export default function JudgePageNew() {
   const [activeCategory, setActiveCategory] = useState(null)
   const [genderFilter, setGenderFilter] = useState('Male') // Male or Female
   const [currentPage, setCurrentPage] = useState(1)
-  const contestantsPerPage = 10
+  const contestantsPerPage = 12
   const [criteriaGuideOpen, setCriteriaGuideOpen] = useState(false)
   const [assistanceOpen, setAssistanceOpen] = useState(false)
   const [assistanceRequested, setAssistanceRequested] = useState(false)
@@ -29,6 +29,10 @@ export default function JudgePageNew() {
   const [activeRoundName, setActiveRoundName] = useState('Current Round')
   const [judgesCount, setJudgesCount] = useState(0)
   const [categoryAssignments, setCategoryAssignments] = useState(new Set())
+  const [judgesScoresOpen, setJudgesScoresOpen] = useState(false)
+  const [allJudges, setAllJudges] = useState([])
+  const [judgesScoresData, setJudgesScoresData] = useState([])
+  const [screenHidden, setScreenHidden] = useState(false)
 
   useEffect(() => {
     if (rounds.length === 0) return
@@ -363,12 +367,14 @@ export default function JudgePageNew() {
       .single()
 
     if (error || !data) {
-      toast.error('Invalid judge link')
+      // Use setTimeout to defer toast outside of render
+      setTimeout(() => toast.error('Invalid judge link'), 0)
       return
     }
 
     if (!data.active) {
-      toast.error('This judge account is deactivated')
+      // Use setTimeout to defer toast outside of render
+      setTimeout(() => toast.error('This judge account is deactivated'), 0)
       return
     }
 
@@ -449,7 +455,8 @@ export default function JudgePageNew() {
 
     if (error) {
       console.error('Failed to load categories:', error)
-      toast.error('Unable to load categories')
+      // Use setTimeout to defer toast outside of render
+      setTimeout(() => toast.error('Unable to load categories'), 0)
       setCategories([])
       setAllCategories([])
       return
@@ -591,13 +598,14 @@ export default function JudgePageNew() {
   const fetchJudgeCount = async () => {
     const { data, error } = await supabase
       .from('judges')
-      .select('id, active')
+      .select('*')
 
     if (error) {
       console.error('Failed to load judges:', error)
       return
     }
 
+    setAllJudges(data || [])
     const activeJudges = (data || []).filter((record) => record.active).length
     setJudgesCount(activeJudges)
   }
@@ -621,6 +629,23 @@ export default function JudgePageNew() {
     }
   }
 
+  const fetchJudgesScoresForContestant = async (contestantId) => {
+    if (!contestantId) return
+    
+    const { data, error } = await supabase
+      .from('contestant_scores')
+      .select('*')
+      .eq('contestant_id', contestantId)
+      .order('judge_id')
+
+    if (error) {
+      console.error('Error fetching judges scores:', error)
+      return
+    }
+
+    setJudgesScoresData(data || [])
+  }
+
   // Calculate totals dynamically
   const calculateCategoryTotal = (category) => {
     if (!category.criteria) return 0
@@ -641,11 +666,31 @@ export default function JudgePageNew() {
   const weightedTotal = calculateWeightedTotal()
 
   const handleScoreChange = (criterionId, value) => {
-    const numValue = parseFloat(value) || 0
+    // Convert to number and limit to max points for this criterion
+    const criterion = categories
+      .flatMap(cat => cat.criteria || [])
+      .find(c => c.id === criterionId)
+    
+    let numValue = parseFloat(value) || 0
+    
+    // Clamp the value to [0, max_points]
+    if (criterion) {
+      numValue = Math.max(0, Math.min(numValue, criterion.max_points))
+    } else {
+      numValue = Math.max(0, numValue)
+    }
+
     console.log(`Score changed for criterion ${criterionId}:`, numValue)
     setCurrentScoresData(prev => {
       const updated = { ...prev, [criterionId]: numValue }
       console.log('Updated scores data:', updated)
+      return updated
+    })
+  }
+
+  const handleClearScore = (criterionId) => {
+    setCurrentScoresData(prev => {
+      const updated = { ...prev, [criterionId]: 0 }
       return updated
     })
   }
@@ -662,44 +707,66 @@ export default function JudgePageNew() {
       console.log('Selected contestant:', selectedContestant.id)
       console.log('Judge:', judge.id)
 
-      // Delete existing scores for this contestant and judge
-      const { error: deleteError } = await supabase
-        .from('contestant_scores')
-        .delete()
-        .eq('contestant_id', selectedContestant.id)
-        .eq('judge_id', judge.id)
-
-      if (deleteError) {
-        console.error('Error deleting old scores:', deleteError)
-        throw deleteError
-      }
-
-      console.log('Old scores deleted successfully')
-
-      // Insert new scores - include all scores, even zeros
-      const scoresToInsert = Object.entries(currentScoresData)
+      // Prepare scores to upsert (update or insert)
+      const scoresToUpsert = Object.entries(currentScoresData)
         .map(([criterionId, score]) => ({
           contestant_id: selectedContestant.id,
           judge_id: judge.id,
-          criterion_id: criterionId, // Keep as string, don't parse to int
+          criterion_id: String(criterionId),
           score: parseFloat(score) || 0
         }))
 
-      console.log('Scores to insert:', scoresToInsert)
-      console.log('Sample criterion ID type:', typeof Object.keys(currentScoresData)[0])
+      console.log('Scores to upsert:', scoresToUpsert)
+      console.log('Total scores to submit:', scoresToUpsert.length)
 
-      if (scoresToInsert.length > 0) {
-        const { data, error } = await supabase
+      if (scoresToUpsert.length > 0) {
+        // First, delete old scores for this contestant-judge pair
+        console.log('Deleting old scores for this contestant-judge pair...')
+        const deleteResult = await supabase
           .from('contestant_scores')
-          .insert(scoresToInsert)
-          .select()
+          .delete()
+          .eq('contestant_id', selectedContestant.id)
+          .eq('judge_id', judge.id)
 
-        if (error) {
-          console.error('Error inserting scores:', error)
-          throw error
+        if (deleteResult.error) {
+          console.error('Error deleting old scores:', deleteResult.error)
+          throw new Error(`Delete failed: ${deleteResult.error.message}`)
+        }
+        
+        console.log('Old scores deleted successfully')
+
+        // Now insert new scores in smaller batches (50 at a time)
+        const batchSize = 50
+        let totalInserted = 0
+        
+        for (let i = 0; i < scoresToUpsert.length; i += batchSize) {
+          const batch = scoresToUpsert.slice(i, i + batchSize)
+          console.log(`Inserting batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(scoresToUpsert.length / batchSize)} (${batch.length} scores)...`)
+          console.log('Batch payload size:', JSON.stringify(batch).length, 'bytes')
+          
+          const insertResult = await supabase
+            .from('contestant_scores')
+            .insert(batch)
+          
+          if (insertResult.error) {
+            console.error(`Error inserting batch at offset ${i}:`, insertResult.error)
+            console.error('Error code:', insertResult.error.code)
+            console.error('Error hint:', insertResult.error.hint)
+            console.error('Error details:', insertResult.error.details)
+            console.error('Failed batch data:', batch)
+            throw new Error(`Insert batch failed: ${insertResult.error.message}`)
+          }
+          
+          totalInserted += batch.length
+          console.log(`Batch inserted: ${totalInserted}/${scoresToUpsert.length} scores saved`)
+          
+          // Small delay between batches to avoid rate limiting
+          if (i + batchSize < scoresToUpsert.length) {
+            await new Promise(resolve => setTimeout(resolve, 200))
+          }
         }
 
-        console.log('Scores inserted successfully:', data)
+        console.log(`✅ All ${totalInserted} scores saved successfully!`)
       } else {
         console.log('No scores to insert')
       }
@@ -775,11 +842,39 @@ export default function JudgePageNew() {
           <BookOpen size={24} />
         </button>
         <button 
+          onClick={() => {
+            if (selectedContestant) {
+              fetchJudgesScoresForContestant(selectedContestant.id)
+              setJudgesScoresOpen(true)
+            }
+          }}
+          disabled={!selectedContestant}
+          className={`p-3 rounded-lg transition-colors ${
+            selectedContestant 
+              ? 'hover:bg-purple-600' 
+              : 'opacity-50 cursor-not-allowed'
+          }`}
+          title="View Judges Scores"
+        >
+          <Users size={24} />
+        </button>
+        <button 
           onClick={() => setAssistanceOpen(true)}
           className="p-3 hover:bg-blue-600 rounded-lg transition-colors"
           title="Get Assistance"
         >
           <HelpCircle size={24} />
+        </button>
+        <button 
+          onClick={() => setScreenHidden(!screenHidden)}
+          className={`p-3 rounded-lg transition-colors ${
+            screenHidden 
+              ? 'bg-red-600 hover:bg-red-700' 
+              : 'hover:bg-gray-700'
+          }`}
+          title={screenHidden ? 'Show Screen' : 'Hide Screen from Audience'}
+        >
+          {screenHidden ? <EyeOff size={24} /> : <Eye size={24} />}
         </button>
         <div className="flex-1"></div>
         <button className="p-3 hover:bg-red-600 rounded-lg transition-colors" title="Logout">
@@ -826,7 +921,22 @@ export default function JudgePageNew() {
 
       {/* Main Content */}
       <div className="relative z-10 min-h-screen flex flex-col lg:pr-16">
-        {/* Header */}
+        {/* When screen is hidden, show a blank area with a message */}
+        {screenHidden ? (
+          <div className="flex-1 flex flex-col items-center justify-center text-center">
+            <EyeOff size={64} className="text-gray-600 mb-4" />
+            <h2 className="text-3xl font-bold text-white mb-2">Screen is Hidden</h2>
+            <p className="text-gray-400 mb-8">Your scoring interface is hidden from the audience</p>
+            <button
+              onClick={() => setScreenHidden(false)}
+              className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold transition-colors"
+            >
+              Show Screen
+            </button>
+          </div>
+        ) : (
+          <>
+            {/* Header */}
         <div className="p-4 sm:p-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 sm:gap-0 bg-gray-800 bg-opacity-50 backdrop-blur-sm border-b border-gray-700">
           <div>
             <h2 className="text-xs text-gray-400 uppercase tracking-widest mb-2 sm:mb-3">MR. AND MS. UNIVERSITY OF MAKATI</h2>
@@ -1015,7 +1125,7 @@ export default function JudgePageNew() {
             </div>
 
             {/* Contestants Grid */}
-            <div className="flex gap-2 sm:gap-4 overflow-x-auto pb-2 scrollbar-thin scrollbar-thumb-gray-600 scrollbar-track-gray-800 mb-3 sm:mb-4">
+            <div className="grid grid-cols-4 sm:grid-cols-6 lg:grid-cols-6 gap-3 sm:gap-4 mb-4 sm:mb-6">
               {getPaginatedContestants().map((contestant) => (
                 <button
                   key={contestant.id}
@@ -1023,11 +1133,11 @@ export default function JudgePageNew() {
                     setSelectedContestant(contestant)
                     setDrawerOpen(false)
                   }}
-                  className={`flex-shrink-0 w-20 sm:w-24 ${
-                    selectedContestant?.id === contestant.id ? 'ring-2 ring-yellow-400' : ''
+                  className={`flex flex-col items-center ${
+                    selectedContestant?.id === contestant.id ? 'ring-2 ring-yellow-400 rounded-lg' : ''
                   }`}
                 >
-                  <div className="w-20 h-20 sm:w-24 sm:h-24 rounded-lg overflow-hidden border-2 border-gray-700 hover:border-yellow-400 transition-colors relative">
+                  <div className="w-24 h-24 sm:w-32 sm:h-32 rounded-lg overflow-hidden border-2 border-gray-700 hover:border-yellow-400 transition-colors relative">
                     {contestant.photo_url ? (
                       <img
                         src={contestant.photo_url}
@@ -1035,24 +1145,24 @@ export default function JudgePageNew() {
                         className="w-full h-full object-cover"
                       />
                     ) : (
-                      <div className="w-full h-full bg-gray-700 flex items-center justify-center text-xl sm:text-2xl font-bold">
+                      <div className="w-full h-full bg-gray-700 flex items-center justify-center text-2xl sm:text-4xl font-bold">
                         {contestant.number}
                       </div>
                     )}
                     {isContestantScored(contestant.id) && (
-                      <div className="absolute top-1 right-1 w-5 h-5 sm:w-6 sm:h-6 bg-green-500 rounded-full flex items-center justify-center">
-                        <span className="text-xs">✓</span>
+                      <div className="absolute top-2 right-2 w-6 h-6 sm:w-7 sm:h-7 bg-green-500 rounded-full flex items-center justify-center">
+                        <span className="text-sm font-bold">✓</span>
                       </div>
                     )}
-                    <div className={`absolute bottom-1 left-1 text-xs font-bold px-1.5 py-0.5 rounded ${
+                    <div className={`absolute bottom-2 left-2 text-sm font-bold px-2 py-1 rounded ${
                       contestant.sex === 'Male' ? 'bg-blue-500' : 'bg-pink-500'
                     }`}>
                       {contestant.sex?.charAt(0)}{contestant.number}
                     </div>
                   </div>
-                  <p className="text-xs mt-1 sm:mt-2 text-center truncate">{contestant.name}</p>
+                  <p className="text-sm mt-2 sm:mt-3 text-center font-semibold line-clamp-2 w-full px-1">{contestant.name}</p>
                   {getContestantScore(contestant.id) && (
-                    <p className="text-xs text-yellow-400 text-center">{getContestantScore(contestant.id).toFixed(1)}</p>
+                    <p className="text-sm text-yellow-400 text-center font-bold mt-1">{getContestantScore(contestant.id).toFixed(1)}</p>
                   )}
                 </button>
               ))}
@@ -1094,6 +1204,8 @@ export default function JudgePageNew() {
             )}
           </div>
         </div>
+          </>
+        )}
       </div>
 
       {/* Scoring Panel Overlay */}
@@ -1151,15 +1263,34 @@ export default function JudgePageNew() {
                               {currentScoresData[criterion.id] || 0}
                             </span>
                           </div>
-                          <input
-                            type="range"
-                            min="0"
-                            max={criterion.max_points}
-                            step="0.5"
-                            value={currentScoresData[criterion.id] || 0}
-                            onChange={(e) => handleScoreChange(criterion.id, e.target.value)}
-                            className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-yellow-400"
-                          />
+                          <div className="flex gap-2 items-center">
+                            <input
+                              type="range"
+                              min="0"
+                              max={criterion.max_points}
+                              step="0.5"
+                              value={currentScoresData[criterion.id] || 0}
+                              onChange={(e) => handleScoreChange(criterion.id, e.target.value)}
+                              className="flex-1 h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-yellow-400"
+                            />
+                            <input
+                              type="number"
+                              min="0"
+                              max={criterion.max_points}
+                              step="0.5"
+                              value={currentScoresData[criterion.id] || 0}
+                              onChange={(e) => handleScoreChange(criterion.id, e.target.value)}
+                              className="w-16 sm:w-20 px-2 sm:px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-center font-bold hover:border-yellow-400 focus:outline-none focus:border-yellow-400"
+                              placeholder="0"
+                            />
+                            <button
+                              onClick={() => handleClearScore(criterion.id)}
+                              className="px-3 sm:px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg font-bold text-sm transition-colors"
+                              title="Clear this score"
+                            >
+                              Clear
+                            </button>
+                          </div>
                         </div>
                       ))
                     ) : (
@@ -1290,268 +1421,414 @@ export default function JudgePageNew() {
         </div>
       )}
 
-      {/* Get Assistance Modal - Cinematic Design */}
+      {/* Get Assistance Modal - Improved Design */}
       {assistanceOpen && (
         <div 
           className="fixed inset-0 bg-black bg-opacity-90 z-50 flex items-center justify-center p-3 sm:p-4 backdrop-blur-sm"
           onClick={() => setAssistanceOpen(false)}
         >
           <div 
-            className="bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900 rounded-2xl sm:rounded-3xl overflow-hidden max-w-4xl w-full max-h-[90vh] shadow-2xl border border-gray-700 relative"
+            className="bg-gray-900 rounded-2xl sm:rounded-3xl overflow-hidden max-w-4xl w-full max-h-[90vh] shadow-2xl border border-gray-700 relative"
             onClick={(e) => e.stopPropagation()}
           >
-            {/* Cinematic Header with Gradient Background */}
-            <div className="relative h-40 sm:h-56 bg-gradient-to-br from-blue-600 via-purple-600 to-pink-600 overflow-hidden">
-              {/* Animated Background Pattern */}
-              <div className="absolute inset-0 bg-black bg-opacity-40"></div>
-              <div className="absolute inset-0 opacity-30" style={{
-                backgroundImage: 'radial-gradient(circle at 20% 50%, rgba(255,255,255,0.2) 0%, transparent 50%), radial-gradient(circle at 80% 80%, rgba(255,255,255,0.2) 0%, transparent 50%)',
-              }}></div>
+            {/* Header with Gradient Background */}
+            <div className="relative h-32 sm:h-40 bg-gradient-to-r from-blue-600 to-blue-700 overflow-visible">
+              <div className="absolute inset-0 bg-black bg-opacity-20"></div>
               
-              {/* Floating Particles Effect */}
-              <div className="absolute inset-0">
-                <div className="absolute top-10 left-10 w-2 h-2 bg-white rounded-full opacity-60 animate-pulse"></div>
-                <div className="absolute top-20 right-20 w-3 h-3 bg-blue-200 rounded-full opacity-40 animate-pulse delay-100"></div>
-                <div className="absolute bottom-10 left-1/4 w-2 h-2 bg-purple-200 rounded-full opacity-50 animate-pulse delay-200"></div>
-              </div>
-
               {/* Close Button */}
               <button
                 onClick={() => setAssistanceOpen(false)}
-                className="absolute top-6 right-6 p-2 bg-black bg-opacity-50 hover:bg-opacity-70 rounded-full transition-all z-10 backdrop-blur-sm group"
+                className="absolute top-4 right-4 p-2 bg-black bg-opacity-40 hover:bg-opacity-60 rounded-lg transition-all z-50 backdrop-blur-sm cursor-pointer"
+                type="button"
               >
-                <X size={24} className="text-white group-hover:rotate-90 transition-transform duration-300" />
+                <X size={20} className="text-white" />
               </button>
 
               {/* Title Content */}
-              <div className="relative z-10 h-full flex flex-col items-center justify-center text-center px-4 sm:px-6">
-                <div className="bg-white bg-opacity-20 p-3 sm:p-5 rounded-2xl backdrop-blur-md mb-3 sm:mb-4 transform hover:scale-110 transition-transform duration-300">
-                  <HelpCircle size={40} className="sm:w-14 sm:h-14 text-white" />
-                </div>
-                <h2 className="text-3xl sm:text-5xl font-bold text-white mb-2 sm:mb-3 tracking-tight drop-shadow-lg">
-                  WE ARE COMING.
-                </h2>
-                <p className="text-blue-100 text-base sm:text-xl font-medium tracking-wide">
-                  TECHNICAL ASSISTANCE & SUPPORT
-                </p>
-                <div className="mt-3 sm:mt-4 flex items-center gap-2 text-white text-xs sm:text-sm">
-                  <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
-                  <span>Available 24/7 during event</span>
+              <div className="relative z-10 h-full flex items-center px-6 sm:px-8">
+                <div className="flex items-center gap-4 sm:gap-6">
+                  <div className="bg-white bg-opacity-20 p-3 sm:p-4 rounded-lg backdrop-blur-md">
+                    <HelpCircle size={32} className="sm:w-10 sm:h-10 text-white" />
+                  </div>
+                  <div>
+                    <h2 className="text-2xl sm:text-3xl font-bold text-white">Help & Support</h2>
+                    <p className="text-blue-100 text-sm sm:text-base mt-1">Judging Guide & Technical Support</p>
+                  </div>
                 </div>
               </div>
             </div>
 
             {/* Content Area */}
-            <div className="p-6 sm:p-8 space-y-4 sm:space-y-6 overflow-y-auto max-h-[calc(90vh-14rem)] bg-gray-900 text-sm sm:text-base">
-              {/* Judge Info */}
-              <div className="bg-gray-900 rounded-lg p-6">
-                <h3 className="text-xl font-bold text-white mb-3">👤 Your Judge Profile</h3>
-                <div className="space-y-2 text-gray-300">
-                  <p><span className="font-semibold text-yellow-400">Name:</span> {judge?.name || 'Not available'}</p>
-                  <p><span className="font-semibold text-yellow-400">Status:</span> {judge?.active ? '✅ Active' : '❌ Inactive'}</p>
-                  <p><span className="font-semibold text-yellow-400">Scored:</span> {scores.length} contestant(s)</p>
-                </div>
-              </div>
-
-              {/* Quick Help */}
-              <div className="bg-gray-900 rounded-lg p-6">
-                <h3 className="text-xl font-bold text-white mb-4">🆘 Quick Help</h3>
-                <div className="space-y-4">
-                  <div>
-                    <h4 className="font-bold text-yellow-400 mb-2">How do I score a contestant?</h4>
-                    <ol className="list-decimal list-inside space-y-1 text-gray-300 text-sm">
-                      <li>Click "Contestants" button at the bottom to open the drawer</li>
-                      <li>Select Male or Female tab</li>
-                      <li>Click on a contestant's photo to select them</li>
-                      <li>Click on a Category button (1, 2, or 3)</li>
-                      <li>Use the sliders to adjust scores</li>
-                      <li>Click "Save Score" to submit</li>
-                    </ol>
-                  </div>
-
-                  <div>
-                    <h4 className="font-bold text-yellow-400 mb-2">What does "Scoring Locked" mean?</h4>
-                    <p className="text-gray-300 text-sm">
-                      When scoring is locked by the admin, you cannot enter or modify scores. 
-                      Wait for the admin to unlock scoring before continuing.
-                    </p>
-                  </div>
-
-                  <div>
-                    <h4 className="font-bold text-yellow-400 mb-2">How are scores calculated?</h4>
-                    <p className="text-gray-300 text-sm">
-                      Your scores are automatically weighted:
-                      <br />• Category 1 = 60% of final score
-                      <br />• Category 2 = 20% of final score
-                      <br />• Category 3 = 20% of final score
-                    </p>
-                  </div>
-
-                  <div>
-                    <h4 className="font-bold text-yellow-400 mb-2">Can I change my scores?</h4>
-                    <p className="text-gray-300 text-sm">
-                      Yes! Simply select the contestant again and adjust the scores. 
-                      Click "Save Score" to update. Your latest scores will be saved.
-                    </p>
-                  </div>
-
-                  <div>
-                    <h4 className="font-bold text-yellow-400 mb-2">The page isn't updating?</h4>
-                    <p className="text-gray-300 text-sm">
-                      Try refreshing the page (F5). If the problem persists, contact technical support.
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              {/* Request Assistance - Prominent Section */}
-              <div className={`rounded-lg p-6 border-2 ${
-                assistanceRequested 
-                  ? 'bg-gradient-to-br from-yellow-900 to-yellow-800 border-yellow-500'
-                  : 'bg-gradient-to-br from-red-900 to-red-800 border-red-500'
-              }`}>
-                <div className="flex items-center gap-3 mb-4">
-                  {assistanceRequested ? (
-                    <Bell size={32} className="text-yellow-300 animate-pulse" />
-                  ) : (
-                    <AlertCircle size={32} className="text-red-300" />
-                  )}
-                  <h3 className="text-2xl font-bold text-white">
-                    {assistanceRequested ? 'Assistance Requested' : 'Need Technical Assistance?'}
-                  </h3>
-                </div>
+            <div className="overflow-y-auto max-h-[calc(90vh-8rem)] bg-gray-900">
+              <div className="p-6 sm:p-8 space-y-6 sm:space-y-8">
                 
-                {assistanceRequested ? (
-                  <div className="space-y-4">
-                    <div className="bg-yellow-800 bg-opacity-50 rounded-lg p-4">
-                      <div className="flex items-center gap-2 mb-2">
-                        <Bell size={20} className="text-yellow-300 animate-pulse" />
-                        <p className="text-yellow-100 font-bold">Admin has been notified!</p>
+                {/* Judge Info Card */}
+                <div className="bg-gradient-to-br from-gray-800 to-gray-900 rounded-lg p-5 sm:p-6 border border-gray-700">
+                  <div className="flex items-center gap-3 mb-4">
+                    <User2 size={24} className="text-blue-400" />
+                    <h3 className="text-lg font-bold text-white">Your Profile</h3>
+                  </div>
+                  <div className="space-y-3 text-sm">
+                    <div className="flex items-center justify-between">
+                      <span className="text-gray-400">Judge Name:</span>
+                      <span className="text-white font-semibold">{judge?.name || 'Not available'}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-gray-400">Status:</span>
+                      <div className="flex items-center gap-2">
+                        {judge?.active ? (
+                          <>
+                            <CheckCircle size={16} className="text-green-400" />
+                            <span className="text-green-400 font-semibold">Active</span>
+                          </>
+                        ) : (
+                          <>
+                            <AlertTriangle size={16} className="text-red-400" />
+                            <span className="text-red-400 font-semibold">Inactive</span>
+                          </>
+                        )}
                       </div>
-                      <p className="text-yellow-200 text-sm">
-                        Event staff will assist you shortly. Please remain at your station.
-                      </p>
                     </div>
-                    
-                    <button
-                      onClick={async () => {
-                        if (!judge) return
-                        
-                        try {
-                          // Update request to cancelled status instead of deleting
-                          const { error } = await supabase
-                            .from('assistance_requests')
-                            .update({ 
-                              status: 'cancelled',
-                              resolved_at: new Date().toISOString()
-                            })
-                            .eq('judge_id', judge.id)
-                            .eq('status', 'pending')
-
-                          if (error) throw error
-
-                          setAssistanceRequested(false)
-                          toast.success('Assistance request cancelled')
-                        } catch (error) {
-                          console.error('Error cancelling request:', error)
-                          toast.error('Failed to cancel request')
-                        }
-                      }}
-                      className="w-full bg-gray-700 hover:bg-gray-600 text-white font-semibold py-3 px-6 rounded-lg transition-colors"
-                    >
-                      Cancel Request
-                    </button>
+                    <div className="flex items-center justify-between">
+                      <span className="text-gray-400">Contestants Scored:</span>
+                      <span className="text-yellow-400 font-bold">{scores.length}</span>
+                    </div>
                   </div>
-                ) : (
+                </div>
+
+                {/* Quick Help Section */}
+                <div>
+                  <div className="flex items-center gap-2 mb-4">
+                    <MessageSquare size={24} className="text-yellow-400" />
+                    <h3 className="text-lg font-bold text-white">Quick Help Guide</h3>
+                  </div>
+                  
                   <div className="space-y-4">
-                    <p className="text-red-100">
-                      Having technical difficulties? Click the button below to notify the admin team. 
-                      Event staff will come to assist you.
-                    </p>
-                    
-                    <button
-                      onClick={async () => {
-                        if (!judge) {
-                          toast.error('Judge information not available')
-                          return
-                        }
-                        
-                        try {
-                          console.log('Creating assistance request for:', judge.name)
-                          
-                          // Create assistance request in database
-                          const { data, error } = await supabase
-                            .from('assistance_requests')
-                            .insert({
-                              judge_id: judge.id,
-                              judge_name: judge.name,
-                              status: 'pending',
-                              requested_at: new Date().toISOString()
-                            })
-                            .select()
+                    {/* How to Score */}
+                    <div className="bg-gray-800 rounded-lg p-4 border border-gray-700 hover:border-blue-600 transition-colors">
+                      <div className="flex gap-3 mb-3">
+                        <div className="bg-blue-600 rounded-lg p-2 flex-shrink-0">
+                          <BarChart3 size={18} className="text-white" />
+                        </div>
+                        <h4 className="font-bold text-white flex-1 mt-1">How to Score a Contestant</h4>
+                      </div>
+                      <ol className="space-y-2 text-gray-300 text-sm ml-8">
+                        <li><span className="text-blue-400 font-semibold">1.</span> Click the "Contestants" button at the bottom</li>
+                        <li><span className="text-blue-400 font-semibold">2.</span> Choose Male or Female category</li>
+                        <li><span className="text-blue-400 font-semibold">3.</span> Click on a contestant's photo to select them</li>
+                        <li><span className="text-blue-400 font-semibold">4.</span> Click on a scoring category (Appearance, Interview, Talent)</li>
+                        <li><span className="text-blue-400 font-semibold">5.</span> Adjust scores using sliders or enter values directly</li>
+                        <li><span className="text-blue-400 font-semibold">6.</span> Click "Save Score" to submit</li>
+                      </ol>
+                    </div>
 
-                          if (error) {
-                            console.error('Database error:', error)
-                            throw error
-                          }
+                    {/* Scoring System */}
+                    <div className="bg-gray-800 rounded-lg p-4 border border-gray-700 hover:border-purple-600 transition-colors">
+                      <div className="flex gap-3 mb-3">
+                        <div className="bg-purple-600 rounded-lg p-2 flex-shrink-0">
+                          <Settings size={18} className="text-white" />
+                        </div>
+                        <h4 className="font-bold text-white flex-1 mt-1">Understanding the Scoring System</h4>
+                      </div>
+                      <div className="space-y-3 text-sm text-gray-300 ml-8">
+                        <p><span className="text-purple-400 font-semibold">Weight Distribution:</span></p>
+                        <div className="bg-gray-900 rounded p-3 space-y-2">
+                          <div className="flex justify-between items-center">
+                            <span>Appearance & Style</span>
+                            <span className="bg-purple-700 px-3 py-1 rounded text-purple-200 font-semibold text-xs">60%</span>
+                          </div>
+                          <div className="flex justify-between items-center">
+                            <span>Interview</span>
+                            <span className="bg-blue-700 px-3 py-1 rounded text-blue-200 font-semibold text-xs">20%</span>
+                          </div>
+                          <div className="flex justify-between items-center">
+                            <span>Talent</span>
+                            <span className="bg-green-700 px-3 py-1 rounded text-green-200 font-semibold text-xs">20%</span>
+                          </div>
+                        </div>
+                        <p className="text-gray-400 text-xs mt-2">These percentages are applied automatically to your scores.</p>
+                      </div>
+                    </div>
 
-                          console.log('Assistance request created:', data)
-                          setAssistanceRequested(true)
-                          toast.success('Assistance request sent to admin!')
-                        } catch (error) {
-                          console.error('Error requesting assistance:', error)
-                          toast.error('Failed to send request. Please raise your hand for event staff.')
-                        }
-                      }}
-                      className="flex items-center justify-center gap-3 w-full bg-red-500 hover:bg-red-400 text-white font-bold py-4 px-6 rounded-xl shadow-lg transition-all transform hover:scale-105"
-                    >
-                      <Bell size={24} />
-                      <span className="text-xl">Request Assistance Now</span>
-                    </button>
+                    {/* Locked Scoring */}
+                    <div className="bg-gray-800 rounded-lg p-4 border border-gray-700 hover:border-red-600 transition-colors">
+                      <div className="flex gap-3 mb-3">
+                        <div className="bg-red-600 rounded-lg p-2 flex-shrink-0">
+                          <AlertTriangle size={18} className="text-white" />
+                        </div>
+                        <h4 className="font-bold text-white flex-1 mt-1">Scoring Locked - What Does It Mean?</h4>
+                      </div>
+                      <p className="text-gray-300 text-sm ml-8">When the admin locks scoring, you cannot enter or modify scores. This usually means the judging phase is over or paused. Wait for the admin to unlock scoring before continuing.</p>
+                    </div>
 
-                    <div className="bg-red-800 bg-opacity-30 rounded-lg p-3">
-                      <p className="text-red-100 text-sm">
-                        <span className="font-bold">What happens next:</span>
-                        <br />• Admin gets instant notification
-                        <br />• Your location and name are sent
-                        <br />• Event staff will come to help you
-                      </p>
+                    {/* Modifying Scores */}
+                    <div className="bg-gray-800 rounded-lg p-4 border border-gray-700 hover:border-yellow-600 transition-colors">
+                      <div className="flex gap-3 mb-3">
+                        <div className="bg-yellow-600 rounded-lg p-2 flex-shrink-0">
+                          <RotateCcw size={18} className="text-white" />
+                        </div>
+                        <h4 className="font-bold text-white flex-1 mt-1">Can I Change My Scores?</h4>
+                      </div>
+                      <p className="text-gray-300 text-sm ml-8">Yes! Select the same contestant again and adjust the scores. Your latest submission will replace the previous one. You can also use the "Clear" button to reset a score back to zero.</p>
+                    </div>
+
+                    {/* Troubleshooting */}
+                    <div className="bg-gray-800 rounded-lg p-4 border border-gray-700 hover:border-orange-600 transition-colors">
+                      <div className="flex gap-3 mb-3">
+                        <div className="bg-orange-600 rounded-lg p-2 flex-shrink-0">
+                          <AlertCircle size={18} className="text-white" />
+                        </div>
+                        <h4 className="font-bold text-white flex-1 mt-1">Troubleshooting</h4>
+                      </div>
+                      <ul className="space-y-2 text-gray-300 text-sm ml-8 list-disc list-inside">
+                        <li><span className="text-orange-400 font-semibold">Page not updating?</span> Try refreshing (F5)</li>
+                        <li><span className="text-orange-400 font-semibold">Can't see contestants?</span> Check if you're in the right gender category</li>
+                        <li><span className="text-orange-400 font-semibold">Score won't save?</span> Make sure all criteria have values</li>
+                        <li><span className="text-orange-400 font-semibold">Still having issues?</span> Request technical assistance below</li>
+                      </ul>
                     </div>
                   </div>
-                )}
-              </div>
+                </div>
 
-              {/* Keyboard Shortcuts */}
-              <div className="bg-gray-800 rounded-lg p-6 border border-gray-700">
-                <h3 className="text-xl font-bold text-white mb-3">⌨️ Keyboard Shortcuts</h3>
-                <div className="grid grid-cols-2 gap-3 text-sm">
-                  <div className="flex justify-between">
-                    <span className="text-gray-400">Open Guide:</span>
-                    <kbd className="px-2 py-1 bg-gray-700 rounded text-yellow-400">📖 Icon</kbd>
+                {/* Request Assistance Section */}
+                <div className={`rounded-lg p-6 border-2 ${
+                  assistanceRequested 
+                    ? 'bg-gradient-to-br from-green-900 to-green-800 border-green-500'
+                    : 'bg-gradient-to-br from-blue-900 to-blue-800 border-blue-500'
+                }`}>
+                  <div className="flex items-center gap-3 mb-4">
+                    {assistanceRequested ? (
+                      <CheckCircle size={28} className="text-green-300 animate-pulse" />
+                    ) : (
+                      <Headphones size={28} className="text-blue-300" />
+                    )}
+                    <h3 className="text-xl font-bold text-white">
+                      {assistanceRequested ? 'Support Request Sent' : 'Need Technical Support?'}
+                    </h3>
                   </div>
-                  <div className="flex justify-between">
-                    <span className="text-gray-400">Get Help:</span>
-                    <kbd className="px-2 py-1 bg-gray-700 rounded text-blue-400">❓ Icon</kbd>
+                  
+                  {assistanceRequested ? (
+                    <div className="space-y-4">
+                      <div className="bg-green-800 bg-opacity-50 rounded-lg p-4">
+                        <div className="flex items-center gap-2 mb-2">
+                          <CheckCircle size={18} className="text-green-300 animate-pulse" />
+                          <p className="text-green-100 font-bold">Admin notified successfully!</p>
+                        </div>
+                        <p className="text-green-200 text-sm">
+                          Event staff has been alerted and will assist you shortly. Please remain at your station.
+                        </p>
+                      </div>
+                      
+                      <button
+                        onClick={async () => {
+                          if (!judge) return
+                          
+                          try {
+                            const { error } = await supabase
+                              .from('assistance_requests')
+                              .delete()
+                              .eq('judge_id', judge.id)
+                              .eq('status', 'pending')
+
+                            if (!error) {
+                              setAssistanceRequested(false)
+                            }
+                          } catch (error) {
+                            console.error('Error canceling assistance:', error)
+                          }
+                        }}
+                        className="w-full bg-gray-700 hover:bg-gray-600 text-white font-semibold py-3 px-6 rounded-lg transition-colors"
+                      >
+                        Cancel Request
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="space-y-4">
+                      <p className="text-blue-100 text-sm">
+                        Having technical issues? Request assistance and an event staff member will come to help you immediately.
+                      </p>
+                      
+                      <button
+                        onClick={async () => {
+                          if (!judge) {
+                            console.error('Judge not loaded')
+                            return
+                          }
+                          
+                          try {
+                            const { error } = await supabase
+                              .from('assistance_requests')
+                              .insert({
+                                judge_id: judge.id,
+                                judge_name: judge.name,
+                                status: 'pending',
+                                created_at: new Date().toISOString()
+                              })
+
+                            if (error) {
+                              console.error('Error requesting assistance:', error)
+                            } else {
+                              setAssistanceRequested(true)
+                            }
+                          } catch (error) {
+                            console.error('Error:', error)
+                          }
+                        }}
+                        className="flex items-center justify-center gap-3 w-full bg-blue-500 hover:bg-blue-400 text-white font-bold py-3 sm:py-4 px-6 rounded-lg shadow-lg transition-all transform hover:scale-[1.02]"
+                      >
+                        <Headphones size={20} />
+                        <span>Request Technical Support</span>
+                      </button>
+
+                      <div className="bg-blue-800 bg-opacity-30 rounded-lg p-3 text-sm">
+                        <p className="text-blue-100">
+                          <span className="font-bold">What happens:</span>
+                          <br />• Admin gets instant notification
+                          <br />• Staff will come to assist you
+                          <br />• Estimated response time: &lt; 2 minutes
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="p-4 sm:p-6 bg-gray-950 border-t border-gray-700">
+              <button
+                onClick={() => setAssistanceOpen(false)}
+                className="w-full bg-blue-600 hover:bg-blue-500 text-white py-3 rounded-lg font-semibold transition-colors"
+              >
+                Close Help
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Judges Scores Overlay */}
+      {judgesScoresOpen && selectedContestant && (
+        <div 
+          className="fixed inset-0 bg-black bg-opacity-90 z-50 flex items-center justify-center p-3 sm:p-4 backdrop-blur-sm"
+          onClick={() => setJudgesScoresOpen(false)}
+        >
+          <div 
+            className="bg-gray-900 rounded-2xl sm:rounded-3xl overflow-hidden max-w-4xl w-full max-h-[90vh] shadow-2xl border border-gray-700 relative"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div className="relative h-32 sm:h-40 bg-gradient-to-r from-purple-600 to-purple-700 overflow-visible">
+              <div className="absolute inset-0 bg-black bg-opacity-20"></div>
+              
+              <button
+                onClick={() => setJudgesScoresOpen(false)}
+                className="absolute top-4 right-4 p-2 bg-black bg-opacity-40 hover:bg-opacity-60 rounded-lg transition-all z-50 backdrop-blur-sm cursor-pointer"
+                type="button"
+              >
+                <X size={20} className="text-white" />
+              </button>
+
+              <div className="relative z-10 h-full flex items-center px-6 sm:px-8">
+                <div className="flex items-center gap-4 sm:gap-6">
+                  <div className="bg-white bg-opacity-20 p-3 sm:p-4 rounded-lg backdrop-blur-md">
+                    <Users size={32} className="sm:w-10 sm:h-10 text-white" />
                   </div>
-                  <div className="flex justify-between">
-                    <span className="text-gray-400">Refresh Page:</span>
-                    <kbd className="px-2 py-1 bg-gray-700 rounded">F5</kbd>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-gray-400">Close Modal:</span>
-                    <kbd className="px-2 py-1 bg-gray-700 rounded">ESC</kbd>
+                  <div>
+                    <h2 className="text-2xl sm:text-3xl font-bold text-white">Judges' Scores</h2>
+                    <p className="text-purple-100 text-sm sm:text-base mt-1">{selectedContestant?.name} (#{selectedContestant?.number})</p>
                   </div>
                 </div>
               </div>
             </div>
 
-            {/* Footer with Close Button */}
-            <div className="p-6 bg-gray-950 border-t border-gray-700">
+            {/* Content */}
+            <div className="overflow-y-auto max-h-[calc(90vh-8rem)] bg-gray-900">
+              <div className="p-6 sm:p-8 space-y-4">
+                {judgesScoresData.length === 0 ? (
+                  <div className="text-center py-12 text-gray-400">
+                    <Eye size={48} className="mx-auto text-gray-600 mb-4" />
+                    <p className="text-lg">No scores yet from other judges</p>
+                    <p className="text-sm mt-2">Scores will appear here as other judges submit their evaluations</p>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {/* Group scores by judge */}
+                    {(() => {
+                      const groupedByJudge = {}
+                      judgesScoresData.forEach(score => {
+                        const judgeId = String(score.judge_id)
+                        if (!groupedByJudge[judgeId]) {
+                          groupedByJudge[judgeId] = []
+                        }
+                        groupedByJudge[judgeId].push(score)
+                      })
+
+                      return Object.entries(groupedByJudge).map(([judgeId, judgeScores]) => {
+                        const judge = allJudges.find(j => String(j.id) === judgeId)
+                        const judgeTotal = judgeScores.reduce((sum, s) => sum + (parseFloat(s.score) || 0), 0)
+                        
+                        return (
+                          <div key={judgeId} className="bg-gray-800 rounded-lg p-5 border border-gray-700 hover:border-purple-600 transition-colors">
+                            <div className="flex items-center justify-between mb-4 pb-4 border-b border-gray-700">
+                              <div className="flex items-center gap-3">
+                                <div className="w-10 h-10 rounded-full bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center text-white font-bold text-sm">
+                                  {judge?.name?.charAt(0) || '?'}
+                                </div>
+                                <div>
+                                  <h4 className="font-bold text-white">{judge?.name || `Judge ${judgeId}`}</h4>
+                                  <p className="text-xs text-gray-400">Total: <span className="text-purple-400 font-bold">{judgeTotal.toFixed(2)}</span></p>
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Category breakdown */}
+                            <div className="space-y-3">
+                              {categories.map(category => {
+                                const categoryScores = judgeScores.filter(score => {
+                                  const criterion = category.criteria?.find(c => String(c.id) === String(score.criterion_id))
+                                  return criterion !== undefined
+                                })
+                                
+                                const categoryTotal = categoryScores.reduce((sum, s) => sum + (parseFloat(s.score) || 0), 0)
+                                const categoryMax = category.criteria?.reduce((sum, c) => sum + c.max_points, 0) || 100
+                                const categoryPercentage = categoryMax > 0 ? (categoryTotal / categoryMax) * 100 : 0
+
+                                return (
+                                  <div key={category.id} className="bg-gray-900 rounded p-3">
+                                    <div className="flex items-center justify-between mb-2">
+                                      <span className="font-semibold text-gray-200">{category.name}</span>
+                                      <div className="flex items-center gap-2">
+                                        <span className="text-purple-400 font-bold">{categoryTotal.toFixed(1)}</span>
+                                        <span className="text-gray-500 text-sm">/ {categoryMax}</span>
+                                      </div>
+                                    </div>
+                                    <div className="w-full bg-gray-700 rounded-full h-2">
+                                      <div
+                                        className="bg-gradient-to-r from-purple-500 to-purple-600 h-2 rounded-full transition-all"
+                                        style={{ width: `${categoryPercentage}%` }}
+                                      />
+                                    </div>
+                                  </div>
+                                )
+                              })}
+                            </div>
+                          </div>
+                        )
+                      })
+                    })()}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="p-4 sm:p-6 bg-gray-950 border-t border-gray-700">
               <button
-                onClick={() => setAssistanceOpen(false)}
-                className="w-full bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 text-white py-4 rounded-xl font-bold text-lg transition-all transform hover:scale-[1.02] shadow-lg"
+                onClick={() => setJudgesScoresOpen(false)}
+                className="w-full bg-purple-600 hover:bg-purple-500 text-white py-3 rounded-lg font-semibold transition-colors"
               >
-                Close Assistant
+                Close
               </button>
             </div>
           </div>
